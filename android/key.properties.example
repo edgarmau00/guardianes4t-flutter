@@ -1,0 +1,4 @@
+storePassword=CAMBIA_ESTA_CONTRASENA
+keyPassword=CAMBIA_ESTA_CONTRASENA
+keyAlias=guardianes4t
+storeFile=../guardianes4t-upload-keystore.jks

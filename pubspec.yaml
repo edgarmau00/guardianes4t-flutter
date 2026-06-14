@@ -1,0 +1,57 @@
+name: guardianes4t
+description: App de captura territorial con OCR offline
+publish_to: 'none'
+
+version: 1.0.1+2
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # OCR
+  google_mlkit_text_recognition: ^0.15.1
+
+  # Imagen / cámara / escaneo de documento
+  image_picker: ^1.1.2
+  image: ^4.5.3
+  camera: ^0.10.5+9
+  doc_scan_flutter: ^1.0.6
+  path_provider: ^2.1.5
+
+  # Estado
+  provider: ^6.1.2
+
+  http: ^1.2.2
+
+  # WhatsApp / deeplink
+  url_launcher: ^6.3.0
+
+  # Base local cifrada
+  sqflite_sqlcipher: ^3.4.0
+  path: ^1.9.0
+
+  # Seguridad / almacenamiento seguro
+  flutter_secure_storage: ^9.2.2
+
+  # Utilidades
+  intl: ^0.19.0
+  uuid: ^4.4.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/cp_catalog.json
+    - assets/models/ine_detector.tflite
+    - assets/models/labels.txt
