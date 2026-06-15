@@ -19,19 +19,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>$(FLUTTER_BUILD_NAME)</string>
+	<string>1.0.2</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<string>3</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Necesitamos acceder a la camara para capturar y escanear la credencial INE.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Necesitamos acceder a tus fotos para adjuntar imagenes de apoyo cuando sea necesario.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Necesitamos guardar imagenes generadas por la aplicacion cuando el proceso lo requiera.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Necesitamos acceder a tus fotos para adjuntar imagenes de apoyo cuando sea necesario.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
