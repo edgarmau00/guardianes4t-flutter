@@ -51,7 +51,6 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/images/
     - assets/cp_catalog.json
     - assets/models/ine_detector.tflite
     - assets/models/labels.txt
