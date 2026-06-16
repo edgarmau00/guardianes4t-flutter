@@ -22,12 +22,20 @@ class CaptureMenuScreen extends StatelessWidget {
                 borderRadius: BorderRadius.circular(24),
               ),
               alignment: Alignment.center,
-              child: const Text(
-                'Guardianes4T',
-                style: TextStyle(
-                  fontSize: 34,
-                  color: Color(0xFF7A0C0C),
-                  fontWeight: FontWeight.bold,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    'Guardianes4T',
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontSize: 34,
+                      color: Color(0xFF7A0C0C),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               ),
             ),

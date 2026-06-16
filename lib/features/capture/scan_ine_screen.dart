@@ -1,7 +1,10 @@
+import 'dart:io';
+import 'dart:math' as math;
+
+import 'package:camera/camera.dart';
 import 'package:doc_scan_flutter/doc_scan.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
-import 'dart:io';
 
 import '../../app/routes.dart';
 import '../../services/ocr_service.dart';
@@ -17,19 +20,287 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
+  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 550);
 
   bool _processing = false;
   bool _scannerOpened = false;
   String _processingMessage = 'Procesando datos...';
 
+  CameraController? _iosCameraController;
+  bool _iosCameraReady = false;
+  bool _iosCameraInitializing = false;
+  bool _iosCaptureInProgress = false;
+  bool _iosStreaming = false;
+  String _iosHint = 'Acomoda la INE dentro del recuadro. La captura sera automatica.';
+  DateTime? _iosLastAnalysisAt;
+  List<int>? _iosPreviousLumaSample;
+  int _iosStableFrames = 0;
+
   @override
   void initState() {
     super.initState();
+
+    if (Platform.isIOS) {
+      _initializeIosCamera();
+      return;
+    }
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _scannerOpened) return;
       _scannerOpened = true;
       _scanWithDocumentScanner();
     });
+  }
+
+  @override
+  void dispose() {
+    _disposeIosCamera();
+    super.dispose();
+  }
+
+  Future<void> _initializeIosCamera() async {
+    if (!Platform.isIOS || _iosCameraInitializing) return;
+
+    _iosCameraInitializing = true;
+
+    try {
+      final cameras = await availableCameras();
+      final rearCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+
+      final controller = CameraController(
+        rearCamera,
+        ResolutionPreset.high,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+
+      await controller.initialize();
+      await controller.setFlashMode(FlashMode.off);
+
+      _iosCameraController = controller;
+      _iosCameraReady = true;
+
+      if (mounted) {
+        setState(() {});
+      }
+
+      await _startIosImageStream();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _iosHint = 'No se pudo abrir la camara. Intenta de nuevo.';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No se pudo inicializar la camara en iPhone.'),
+        ),
+      );
+    } finally {
+      _iosCameraInitializing = false;
+    }
+  }
+
+  Future<void> _disposeIosCamera() async {
+    final controller = _iosCameraController;
+    _iosCameraController = null;
+    _iosStreaming = false;
+    _iosCameraReady = false;
+
+    if (controller == null) return;
+
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {}
+
+    await controller.dispose();
+  }
+
+  Future<void> _startIosImageStream() async {
+    final controller = _iosCameraController;
+    if (!Platform.isIOS || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    if (_iosStreaming || _iosCaptureInProgress || _processing) return;
+
+    _iosPreviousLumaSample = null;
+    _iosLastAnalysisAt = null;
+    _iosStableFrames = 0;
+
+    await controller.startImageStream((CameraImage image) async {
+      if (!_iosStreaming || _iosCaptureInProgress || _processing) return;
+
+      final now = DateTime.now();
+      if (_iosLastAnalysisAt != null &&
+          now.difference(_iosLastAnalysisAt!) < _iosFrameAnalysisGap) {
+        return;
+      }
+      _iosLastAnalysisAt = now;
+
+      final signal = _analyzeIosFrame(image);
+      final previous = _iosPreviousLumaSample;
+      final motion = previous == null
+          ? double.infinity
+          : _calculateMotion(previous, signal.sample);
+
+      _iosPreviousLumaSample = signal.sample;
+
+      final hasEnoughDetail = signal.edgeScore > 18 && signal.contrast > 22;
+      final brightnessOk = signal.brightness > 55 && signal.brightness < 215;
+      final isStable = motion < 11;
+
+      if (hasEnoughDetail && brightnessOk && isStable) {
+        _iosStableFrames += 1;
+      } else {
+        _iosStableFrames = 0;
+      }
+
+      if (!mounted) return;
+
+      if (_iosStableFrames >= 3) {
+        setState(() {
+          _iosHint = 'Documento estable. Tomando foto...';
+        });
+        await _takeSingleAutoPicture();
+        return;
+      }
+
+      final nextHint = hasEnoughDetail
+          ? 'Manten la INE quieta dentro del recuadro...'
+          : 'Acerca la INE y encuadrala dentro del recuadro.';
+
+      if (_iosHint != nextHint) {
+        setState(() {
+          _iosHint = nextHint;
+        });
+      }
+    });
+
+    _iosStreaming = true;
+  }
+
+  _IosFrameSignal _analyzeIosFrame(CameraImage image) {
+    final plane = image.planes.first;
+    final bytes = plane.bytes;
+    final bytesPerRow = plane.bytesPerRow;
+    final width = image.width;
+    final height = image.height;
+
+    final left = (width * 0.18).floor();
+    final right = (width * 0.82).floor();
+    final top = (height * 0.26).floor();
+    final bottom = (height * 0.74).floor();
+
+    final sample = <int>[];
+    double brightnessSum = 0;
+    double edgeSum = 0;
+    int count = 0;
+
+    for (int y = top; y < bottom - 2; y += 14) {
+      for (int x = left; x < right - 2; x += 14) {
+        final index = y * bytesPerRow + x;
+        final center = bytes[index];
+        final rightPixel = bytes[index + 1];
+        final bottomPixel = bytes[index + bytesPerRow];
+
+        brightnessSum += center;
+        edgeSum +=
+            (center - rightPixel).abs() + (center - bottomPixel).abs();
+        sample.add(center);
+        count++;
+      }
+    }
+
+    if (count == 0) {
+      return const _IosFrameSignal(
+        brightness: 0,
+        edgeScore: 0,
+        contrast: 0,
+        sample: <int>[],
+      );
+    }
+
+    final brightness = brightnessSum / count;
+    double varianceSum = 0;
+    for (final value in sample) {
+      varianceSum += math.pow(value - brightness, 2).toDouble();
+    }
+
+    final contrast = math.sqrt(varianceSum / count);
+    return _IosFrameSignal(
+      brightness: brightness,
+      edgeScore: edgeSum / count,
+      contrast: contrast,
+      sample: sample,
+    );
+  }
+
+  double _calculateMotion(List<int> previous, List<int> current) {
+    final length = math.min(previous.length, current.length);
+    if (length == 0) return double.infinity;
+
+    double diff = 0;
+    for (int i = 0; i < length; i++) {
+      diff += (previous[i] - current[i]).abs();
+    }
+    return diff / length;
+  }
+
+  Future<void> _takeSingleAutoPicture() async {
+    final controller = _iosCameraController;
+    if (!Platform.isIOS ||
+        controller == null ||
+        !controller.value.isInitialized ||
+        _iosCaptureInProgress ||
+        _processing) {
+      return;
+    }
+
+    _iosCaptureInProgress = true;
+
+    try {
+      if (controller.value.isStreamingImages) {
+        _iosStreaming = false;
+        await controller.stopImageStream();
+      }
+
+      setState(() {
+        _processing = true;
+        _processingMessage = 'Capturando imagen...';
+      });
+
+      final image = await controller.takePicture();
+      final success = await _processImagePath(image.path);
+
+      if (!success && mounted) {
+        setState(() {
+          _processing = false;
+          _iosHint =
+              'No se pudo leer bien. Reacomoda la INE y mantela quieta para reintentar.';
+        });
+        _iosCaptureInProgress = false;
+        await _startIosImageStream();
+        return;
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _processing = false;
+          _iosHint = 'No se pudo tomar la foto. Intenta de nuevo.';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo tomar la foto en iPhone.'),
+          ),
+        );
+      }
+    } finally {
+      _iosCaptureInProgress = false;
+    }
   }
 
   Future<_ImageQualityCheck> _validateImageQuality(String imagePath) async {
@@ -138,7 +409,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           content: Text('No se pudo escanear el documento. Intenta de nuevo.'),
         ),
       );
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
       setState(() => _processing = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -149,8 +420,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
   }
 
-  Future<void> _processImagePath(String imagePath) async {
-    if (!mounted) return;
+  Future<bool> _processImagePath(String imagePath) async {
+    if (!mounted) return false;
 
     setState(() {
       _processing = true;
@@ -159,12 +430,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     final qualityCheck = await _validateImageQuality(imagePath);
     if (qualityCheck.blockingMessage != null) {
-      if (!mounted) return;
+      if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(qualityCheck.blockingMessage!)),
       );
       setState(() => _processing = false);
-      return;
+      return false;
     }
 
     if (qualityCheck.warningMessage != null && mounted) {
@@ -173,7 +444,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       );
     }
 
-    if (!mounted) return;
+    if (!mounted) return false;
 
     setState(() {
       _processingMessage = 'Corrigiendo imagen y leyendo datos...';
@@ -188,7 +459,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       data['processingMode'] = rawResult['processingMode'] ?? 'ocr_only';
       data['globalConfidence'] = validation.globalConfidence;
 
-      if (!mounted) return;
+      if (!mounted) return false;
 
       Navigator.pushReplacementNamed(
         context,
@@ -202,8 +473,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           'globalConfidence': validation.globalConfidence,
         },
       );
-    } catch (e) {
-      if (!mounted) return;
+      return true;
+    } catch (_) {
+      if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -211,12 +483,167 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           ),
         ),
       );
+      setState(() => _processing = false);
+      return false;
     } finally {
       await ocr.dispose();
-      if (mounted) {
+      if (mounted && !Platform.isIOS) {
         setState(() => _processing = false);
       }
     }
+  }
+
+  Widget _buildAndroidBody() {
+    return Positioned.fill(
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Escaneo de INE',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF111827),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Usa el escaner inteligente para capturar la credencial y continuar con la lectura OCR.',
+                    style: TextStyle(
+                      fontSize: 15,
+                      height: 1.4,
+                      color: Color(0xFF4B5563),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _processing ? null : _scanWithDocumentScanner,
+                      icon: const Icon(Icons.document_scanner_outlined),
+                      label: Text(
+                        _processing ? 'Procesando...' : 'Abrir escaner',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIosBody() {
+    final controller = _iosCameraController;
+
+    if (!_iosCameraReady || controller == null || !controller.value.isInitialized) {
+      return Positioned.fill(
+        child: Container(
+          color: Colors.black,
+          child: const Center(
+            child: CircularProgressIndicator(color: Colors.white),
+          ),
+        ),
+      );
+    }
+
+    return Positioned.fill(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          CameraPreview(controller),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.18),
+            ),
+          ),
+          Center(
+            child: Container(
+              width: MediaQuery.of(context).size.width * 0.84,
+              height: MediaQuery.of(context).size.height * 0.33,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Colors.white, width: 3),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 32,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.55),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Escaneo de INE',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 22,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _iosHint,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 36,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Captura automatica activada',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: _processing || _iosCaptureInProgress
+                      ? null
+                      : _takeSingleAutoPicture,
+                  icon: const Icon(Icons.camera_alt_outlined),
+                  label: const Text('Tomar ahora'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -226,57 +653,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            Positioned.fill(
-              child: Container(
-                padding: const EdgeInsets.all(24),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 560),
-                    child: Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(24),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Escaneo de INE',
-                            style: TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xFF111827),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          const Text(
-                            'Usa el escaner inteligente para capturar la credencial y continuar con la lectura OCR.',
-                            style: TextStyle(
-                              fontSize: 15,
-                              height: 1.4,
-                              color: Color(0xFF4B5563),
-                            ),
-                          ),
-                          const SizedBox(height: 22),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.icon(
-                              onPressed: _processing ? null : _scanWithDocumentScanner,
-                              icon: const Icon(Icons.document_scanner_outlined),
-                              label: Text(
-                                _processing ? 'Procesando...' : 'Abrir escaner',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+            Platform.isIOS ? _buildIosBody() : _buildAndroidBody(),
             if (_processing)
               Positioned.fill(
                 child: Container(
@@ -329,5 +706,19 @@ class _ImageQualityCheck {
   const _ImageQualityCheck({
     this.blockingMessage,
     this.warningMessage,
+  });
+}
+
+class _IosFrameSignal {
+  final double brightness;
+  final double edgeScore;
+  final double contrast;
+  final List<int> sample;
+
+  const _IosFrameSignal({
+    required this.brightness,
+    required this.edgeScore,
+    required this.contrast,
+    required this.sample,
   });
 }

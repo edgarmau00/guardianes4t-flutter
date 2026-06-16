@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 class DashboardCard extends StatelessWidget {
@@ -18,6 +20,10 @@ class DashboardCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final compact = width <= 390;
+    final iosTight = Platform.isIOS && width <= 430;
+
     final card = Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -33,43 +39,43 @@ class DashboardCard extends StatelessWidget {
           ),
         ],
       ),
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.all(iosTight ? 12 : (compact ? 14 : 16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            height: 54,
-            width: 54,
+            height: iosTight ? 44 : (compact ? 48 : 54),
+            width: iosTight ? 44 : (compact ? 48 : 54),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
+              color: color.withOpacity(0.12),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Icon(
               icon,
               color: color,
-              size: 28,
+              size: iosTight ? 22 : (compact ? 24 : 28),
             ),
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: iosTight ? 10 : (compact ? 12 : 16)),
           Text(
             value,
             style: TextStyle(
-              fontSize: 28,
+              fontSize: iosTight ? 22 : (compact ? 24 : 28),
               fontWeight: FontWeight.w800,
               color: color,
               height: 1,
             ),
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: iosTight ? 6 : (compact ? 8 : 10)),
           Expanded(
             child: Text(
               title,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 14,
-                height: 1.3,
-                color: Color(0xFF374151),
+              maxLines: iosTight ? 3 : (compact ? 4 : 3),
+              overflow: TextOverflow.fade,
+              style: TextStyle(
+                fontSize: iosTight ? 12 : (compact ? 13 : 14),
+                height: iosTight ? 1.2 : 1.3,
+                color: const Color(0xFF374151),
                 fontWeight: FontWeight.w600,
               ),
             ),

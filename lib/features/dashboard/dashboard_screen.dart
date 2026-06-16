@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
@@ -162,8 +163,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }).toList();
 
       final managedGuardianRows = promotedRows.where((row) {
-        final ownerAdminUserId =
-            (row['owner_admin_user_id'] ?? '').toString();
+        final ownerAdminUserId = (row['owner_admin_user_id'] ?? '').toString();
         final ownerLocalId = (row['owner_leader_local_id'] ?? '').toString();
         final ownerRemoteId = (row['owner_leader_remote_id'] ?? '').toString();
 
@@ -484,6 +484,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     const primary = Color(0xFF7B1E2B);
+    final width = MediaQuery.of(context).size.width;
+    final compact = width <= 390;
+    final iosTight = Platform.isIOS && width <= 430;
 
     return Scaffold(
       appBar: AppBar(
@@ -505,10 +508,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ? const Center(child: CircularProgressIndicator())
           : SafeArea(
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 14 : 16,
+                  8,
+                  compact ? 14 : 16,
+                  100,
+                ),
                 children: [
                   Container(
-                    padding: const EdgeInsets.all(20),
+                    padding: EdgeInsets.all(compact ? 18 : 20),
                     decoration: BoxDecoration(
                       color: primary,
                       borderRadius: BorderRadius.circular(28),
@@ -553,61 +561,127 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 18),
                   Container(
-                    padding: const EdgeInsets.all(16),
+                    padding:
+                        EdgeInsets.all(iosTight ? 16 : (compact ? 14 : 16)),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(22),
                       border: Border.all(color: const Color(0xFFE5E7EB)),
                     ),
-                    child: Row(
-                      children: [
-                        Container(
-                          height: 46,
-                          width: 46,
-                          decoration: BoxDecoration(
-                            color: primary.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: const Icon(
-                            Icons.sync_rounded,
-                            color: primary,
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        const Expanded(
-                          child: Column(
+                    child: iosTight
+                        ? Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                'Sincronizacion',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                  color: Color(0xFF111827),
-                                ),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    height: 46,
+                                    width: 46,
+                                    decoration: BoxDecoration(
+                                      color: primary.withOpacity(0.12),
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    child: const Icon(
+                                      Icons.sync_rounded,
+                                      color: primary,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 14),
+                                  const Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Sincronizacion',
+                                          style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w800,
+                                            color: Color(0xFF111827),
+                                          ),
+                                        ),
+                                        SizedBox(height: 4),
+                                        Text(
+                                          'Envia los registros locales al servidor',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color: Color(0xFF6B7280),
+                                            height: 1.35,
+                                          ),
+                                          maxLines: 2,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
-                              SizedBox(height: 4),
-                              Text(
-                                'Envia los registros locales al servidor',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Color(0xFF6B7280),
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton(
+                                  onPressed: () => _sync(context),
+                                  style: ElevatedButton.styleFrom(
+                                    minimumSize: const Size.fromHeight(48),
+                                  ),
+                                  child: const Text('Sincronizar'),
                                 ),
                               ),
                             ],
+                          )
+                        : Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Container(
+                                height: compact ? 42 : 46,
+                                width: compact ? 42 : 46,
+                                decoration: BoxDecoration(
+                                  color: primary.withOpacity(0.12),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: const Icon(
+                                  Icons.sync_rounded,
+                                  color: primary,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Sincronizacion',
+                                      style: TextStyle(
+                                        fontSize: compact ? 15 : 16,
+                                        fontWeight: FontWeight.w800,
+                                        color: const Color(0xFF111827),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Envia los registros locales al servidor',
+                                      style: TextStyle(
+                                        fontSize: compact ? 12 : 13,
+                                        color: const Color(0xFF6B7280),
+                                      ),
+                                      maxLines: compact ? 4 : 3,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              SizedBox(width: compact ? 10 : 12),
+                              ElevatedButton(
+                                onPressed: () => _sync(context),
+                                style: ElevatedButton.styleFrom(
+                                  minimumSize: Size(compact ? 96 : 110, 46),
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: compact ? 12 : 16,
+                                  ),
+                                ),
+                                child: const Text('Sincronizar'),
+                              ),
+                            ],
                           ),
-                        ),
-                        const SizedBox(width: 12),
-                        ElevatedButton(
-                          onPressed: () => _sync(context),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(110, 46),
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                          ),
-                          child: const Text('Sincronizar'),
-                        ),
-                      ],
-                    ),
                   ),
                   const SizedBox(height: 22),
                   const Text(
@@ -621,9 +695,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   const SizedBox(height: 14),
                   GridView.count(
                     crossAxisCount: 2,
-                    crossAxisSpacing: 14,
-                    mainAxisSpacing: 14,
-                    childAspectRatio: 0.92,
+                    crossAxisSpacing: iosTight ? 10 : (compact ? 12 : 14),
+                    mainAxisSpacing: iosTight ? 10 : (compact ? 12 : 14),
+                    childAspectRatio: iosTight ? 0.74 : (compact ? 0.84 : 0.92),
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
                     children: [
