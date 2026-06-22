@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../data/local/db_api.dart';
 import '../../data/local/local_db.dart';
 import '../../services/app_data_bus.dart';
 import '../../services/auth_service.dart';

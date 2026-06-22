@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../data/local/db_api.dart';
 import '../data/local/local_db.dart';
 import '../data/models/promoted_record.dart';
 import '../data/remote/api_service.dart';

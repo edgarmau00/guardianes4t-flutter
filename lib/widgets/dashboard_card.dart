@@ -1,5 +1,4 @@
-import 'dart:io';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 class DashboardCard extends StatelessWidget {
@@ -22,7 +21,8 @@ class DashboardCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
     final compact = width <= 390;
-    final iosTight = Platform.isIOS && width <= 430;
+    final iosTight =
+        width <= 430 && (kIsWeb || defaultTargetPlatform == TargetPlatform.iOS);
 
     final card = Container(
       decoration: BoxDecoration(

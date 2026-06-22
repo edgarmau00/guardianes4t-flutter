@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../../app/routes.dart';
+import '../../data/local/db_api.dart';
 import '../../data/local/local_db.dart';
 import '../../data/remote/api_service.dart';
 import '../../services/app_data_bus.dart';
@@ -486,7 +486,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     const primary = Color(0xFF7B1E2B);
     final width = MediaQuery.of(context).size.width;
     final compact = width <= 390;
-    final iosTight = Platform.isIOS && width <= 430;
+    final iosTight =
+        width <= 430 && (kIsWeb || defaultTargetPlatform == TargetPlatform.iOS);
 
     return Scaffold(
       appBar: AppBar(
