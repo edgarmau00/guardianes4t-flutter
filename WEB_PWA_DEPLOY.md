@@ -17,6 +17,11 @@ Esta version Web/PWA se agrego aparte para distribuir Guardianes4T por Safari en
 - Ajustes PWA para Safari:
   - `web/index.html`
   - `web/manifest.json`
+- Motor OCR web empaquetado localmente:
+  - `web/ocr/tesseract.min.js`
+  - `web/ocr/worker.min.js`
+  - `web/ocr/tesseract-core*.wasm*`
+  - `web/ocr/spa.traineddata.gz`
 
 ## Build web
 
@@ -61,7 +66,13 @@ Opciones comunes:
 
 ## Nota sobre OCR web
 
-En Web la lectura OCR usa `Tesseract.js` en el navegador y luego normaliza los datos antes de entrar al flujo existente de revision OCR y registro.
+En Web la lectura OCR usa `Tesseract.js` empaquetado dentro de la propia PWA para evitar depender de CDN externas. El flujo OCR sigue ocurriendo en el navegador y luego normaliza los datos antes de entrar al flujo existente de revision OCR y registro.
+
+## Nota sobre offline
+
+- La PWA puede abrir con cache local si ya fue cargada e instalada previamente.
+- Los registros siguen usando la base local web existente para trabajo sin conexion.
+- El OCR web ahora usa archivos locales del proyecto para no requerir descarga externa del motor OCR.
 
 ## Nota sobre Android/iOS
 

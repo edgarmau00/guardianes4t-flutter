@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_util' as js_util;
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:html' as html;
+import 'dart:ui_web' as ui_web;
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
@@ -10,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../app/routes.dart';
 import '../../services/ocr_validation_service.dart';
+import '../../services/web_document_detector.dart';
 import '../../services/web_ocr_parser.dart';
 
 class ScanIneScreen extends StatefulWidget {
@@ -21,31 +24,239 @@ class ScanIneScreen extends StatefulWidget {
 
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const Duration _ocrTimeout = Duration(seconds: 45);
+  static const Duration _analysisGap = Duration(milliseconds: 280);
+  static const int _requiredStableFrames = 3;
+  static const String _tesseractScriptAsset = 'ocr/tesseract.min.js';
+  static const String _tesseractWorkerAsset = 'ocr/worker.min.js';
+  static const String _tesseractLangAsset = 'ocr';
+  static const String _tesseractCoreAsset = 'ocr/tesseract-core-simd.wasm.js';
 
   final ImagePicker _imagePicker = ImagePicker();
-  bool _processing = false;
-  String _message =
-      'Desde Safari puedes tomar la foto de la INE o subirla desde tu galeria.';
+  final WebDocumentDetector _documentDetector = WebDocumentDetector();
+  final String _viewId =
+      'guardianes4t-web-camera-${DateTime.now().microsecondsSinceEpoch}';
 
-  Future<void> _pickFromCamera() async {
-    await _captureAndProcess(ImageSource.camera);
+  html.VideoElement? _videoElement;
+  html.CanvasElement? _analysisCanvas;
+  html.MediaStream? _mediaStream;
+  Timer? _analysisTimer;
+  DocumentRect? _lastDetectedRect;
+  Future<void>? _tesseractLoader;
+
+  bool _cameraReady = false;
+  bool _processing = false;
+  bool _initializingCamera = true;
+  int _stableFrames = 0;
+  String _message =
+      'Coloca la INE dentro del recuadro. Cuando la detectemos estable, la capturamos automaticamente.';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeCamera();
+    });
+  }
+
+  @override
+  void dispose() {
+    _analysisTimer?.cancel();
+    _stopCamera();
+    super.dispose();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final video = html.VideoElement()
+        ..autoplay = true
+        ..muted = true
+        ..setAttribute('playsinline', 'true')
+        ..style.width = '100%'
+        ..style.height = '100%'
+        ..style.objectFit = 'cover'
+        ..style.border = '0'
+        ..style.backgroundColor = '#111827';
+
+      final mediaDevices = html.window.navigator.mediaDevices;
+      if (mediaDevices == null) {
+        throw StateError('La camara no esta disponible en este navegador.');
+      }
+
+      final constraints = <String, dynamic>{
+        'audio': false,
+        'video': <String, dynamic>{
+          'facingMode': <String, dynamic>{'ideal': 'environment'},
+          'width': <String, dynamic>{'ideal': 1920},
+          'height': <String, dynamic>{'ideal': 1080},
+        },
+      };
+
+      final stream = await mediaDevices.getUserMedia(constraints);
+      await _applyPreferredTrackConstraints(stream);
+      video.srcObject = stream;
+      await video.play();
+
+      ui_web.platformViewRegistry.registerViewFactory(_viewId, (int _) => video);
+
+      _videoElement = video;
+      _mediaStream = stream;
+      _analysisCanvas = html.CanvasElement(width: 480, height: 300);
+
+      await _waitForVideoFrame(video);
+      _startAnalysisLoop();
+
+      if (!mounted) return;
+      setState(() {
+        _cameraReady = true;
+        _initializingCamera = false;
+        _message =
+            'Manten la INE centrada y quieta. La captura se hara sola cuando la lectura sea estable.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _initializingCamera = false;
+        _message =
+            'No se pudo abrir la camara en Safari. Puedes intentar de nuevo o elegir una foto de la galeria.';
+      });
+    }
+  }
+
+  Future<void> _applyPreferredTrackConstraints(html.MediaStream stream) async {
+    try {
+      final tracks = stream.getVideoTracks();
+      if (tracks.isEmpty) return;
+
+      final track = tracks.first;
+      final advanced = <Map<String, dynamic>>[
+        {'focusMode': 'continuous'},
+        {'exposureMode': 'continuous'},
+        {'whiteBalanceMode': 'continuous'},
+      ];
+
+      final capabilities = js_util.callMethod<Object?>(track, 'getCapabilities', []);
+      if (capabilities != null) {
+        final zoom = js_util.getProperty<Object?>(capabilities, 'zoom');
+        if (zoom != null) {
+          final min = (js_util.getProperty<num>(zoom, 'min')).toDouble();
+          final max = (js_util.getProperty<num>(zoom, 'max')).toDouble();
+          final preferred = (min + ((max - min) * 0.18)).clamp(min, max);
+          advanced.add({'zoom': preferred});
+        }
+
+        final torch = js_util.getProperty<Object?>(capabilities, 'torch');
+        if (torch == true) {
+          advanced.add({'torch': false});
+        }
+      }
+
+      final promise = js_util.callMethod<Object?>(
+        track,
+        'applyConstraints',
+        [
+          {
+            'advanced': advanced,
+          },
+        ],
+      );
+
+      if (promise != null) {
+        await js_util.promiseToFuture<Object?>(promise);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _waitForVideoFrame(html.VideoElement video) async {
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      return;
+    }
+
+    final completer = Completer<void>();
+    late html.EventListener listener;
+    listener = (_) {
+      if (!completer.isCompleted &&
+          video.videoWidth > 0 &&
+          video.videoHeight > 0) {
+        video.removeEventListener('loadedmetadata', listener);
+        completer.complete();
+      }
+    };
+    video.addEventListener('loadedmetadata', listener);
+    await completer.future.timeout(const Duration(seconds: 10));
+  }
+
+  void _startAnalysisLoop() {
+    _analysisTimer?.cancel();
+    _analysisTimer = Timer.periodic(_analysisGap, (_) async {
+      if (_processing || !_cameraReady || _videoElement == null) return;
+
+      final analysis = _analyzeCurrentFrame();
+
+      if (!mounted) return;
+      setState(() {
+        _message = analysis.message;
+        _lastDetectedRect = analysis.rect;
+      });
+
+      if (analysis.readyForAutoCapture) {
+        _stableFrames += 1;
+      } else {
+        _stableFrames = 0;
+      }
+
+      if (_stableFrames >= _requiredStableFrames) {
+        _stableFrames = 0;
+        await _captureFromLiveCamera();
+      }
+    });
+  }
+
+  DocumentFrameAnalysis _analyzeCurrentFrame() {
+    final video = _videoElement;
+    final canvas = _analysisCanvas;
+    if (video == null || canvas == null) {
+      return const DocumentFrameAnalysis(
+        message: 'Preparando camara...',
+        readyForAutoCapture: false,
+      );
+    }
+    if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+      return const DocumentFrameAnalysis(
+        message: 'Esperando video de la camara...',
+        readyForAutoCapture: false,
+      );
+    }
+
+    return _documentDetector.analyzeFrame(
+      video: video,
+      canvas: canvas,
+      previousRect: _lastDetectedRect,
+    );
+  }
+
+  Future<void> _captureFromLiveCamera() async {
+    final video = _videoElement;
+    if (video == null || _processing) return;
+    if (video.videoWidth <= 0 || video.videoHeight <= 0) return;
+
+    final bytes = _documentDetector.captureDocument(
+      video: video,
+      detectedRect: _lastDetectedRect,
+    );
+    await _processImageBytes(bytes, sourceLabel: 'camara');
   }
 
   Future<void> _pickFromGallery() async {
-    await _captureAndProcess(ImageSource.gallery);
-  }
-
-  Future<void> _captureAndProcess(ImageSource source) async {
     if (_processing) return;
 
     try {
       setState(() {
         _processing = true;
-        _message = 'Abriendo camara...';
+        _message = 'Abriendo galeria...';
       });
 
       final picked = await _imagePicker.pickImage(
-        source: source,
+        source: ImageSource.gallery,
         imageQuality: 92,
         maxWidth: 1800,
       );
@@ -55,13 +266,37 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {
           _processing = false;
           _message =
-              'Desde Safari puedes tomar la foto de la INE o subirla desde tu galeria.';
+              'Manten la INE centrada y quieta. La captura se hara sola cuando la lectura sea estable.';
         });
         return;
       }
 
-      final bytes = await picked.readAsBytes();
-      final previewBytes = _normalizeForPreview(bytes);
+      await _processImageBytes(await picked.readAsBytes(), sourceLabel: 'galeria');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _processing = false;
+        _message =
+            'No se pudo abrir la galeria. Intenta otra vez o usa la camara.';
+      });
+    }
+  }
+
+  Future<void> _processImageBytes(
+    Uint8List bytes, {
+    required String sourceLabel,
+  }) async {
+    Uint8List? previewBytes;
+    try {
+      if (!mounted) return;
+      setState(() {
+        _processing = true;
+        _message = sourceLabel == 'camara'
+            ? 'Procesando captura automatica...'
+            : 'Preparando imagen seleccionada...';
+      });
+
+      previewBytes = _normalizeForPreview(bytes);
 
       if (!mounted) return;
       setState(() {
@@ -69,7 +304,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       });
 
       final rawText = await _runWebOcr(previewBytes).timeout(_ocrTimeout);
-      final parsed = WebOcrParser().parse(rawText);
+      final parsed = await WebOcrParser().parse(rawText);
       final validation = OcrValidationService().validate(parsed);
       final normalized = Map<String, dynamic>.from(validation.normalizedData);
 
@@ -84,7 +319,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           'confidence': validation.confidence,
           'rawText': rawText,
           'imagePath': '',
-          'processingMode': 'web_tesseract',
+          'processingMode': parsed['processingMode'] ?? 'web_tesseract',
           'globalConfidence': validation.globalConfidence,
         },
       );
@@ -102,6 +337,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           ),
         ),
       );
+    } finally {
+      _wipeBytes(bytes);
+      if (previewBytes != null && !identical(previewBytes, bytes)) {
+        _wipeBytes(previewBytes!);
+      }
     }
   }
 
@@ -109,14 +349,30 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) return bytes;
 
-    final normalized = decoded.width > 1800
-        ? img.copyResize(decoded, width: 1800)
-        : decoded;
+    var normalized = decoded;
+    if (decoded.width > decoded.height) {
+      normalized = img.copyRotate(decoded, angle: 90);
+    }
+
+    if (normalized.width > 1800) {
+      normalized = img.copyResize(normalized, width: 1800);
+    }
 
     return Uint8List.fromList(img.encodeJpg(normalized, quality: 90));
   }
 
+  void _wipeBytes(Uint8List buffer) {
+    if (buffer.isEmpty) return;
+    buffer.fillRange(0, buffer.length, 0);
+  }
+
+  String _resolveWebAssetUrl(String relativePath) {
+    return Uri.base.resolve(relativePath).toString();
+  }
+
   Future<String> _runWebOcr(Uint8List bytes) async {
+    await _ensureTesseractLoaded();
+
     final tesseract = js_util.getProperty(html.window, 'Tesseract');
     if (tesseract == null) {
       throw StateError('Tesseract no esta disponible en Web.');
@@ -126,7 +382,15 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final recognizePromise = js_util.callMethod(
       tesseract,
       'recognize',
-      [dataUrl, 'spa'],
+      [
+        dataUrl,
+        'spa',
+        {
+          'workerPath': _resolveWebAssetUrl(_tesseractWorkerAsset),
+          'langPath': _resolveWebAssetUrl(_tesseractLangAsset),
+          'corePath': _resolveWebAssetUrl(_tesseractCoreAsset),
+        },
+      ],
     );
     final result = await js_util.promiseToFuture<Object?>(recognizePromise);
     final data = js_util.getProperty(result!, 'data');
@@ -134,8 +398,76 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     return (text ?? '').toString().trim();
   }
 
+  Future<void> _ensureTesseractLoaded() {
+    final existing = js_util.getProperty<Object?>(html.window, 'Tesseract');
+    if (existing != null) {
+      return Future.value();
+    }
+
+    final pending = _tesseractLoader;
+    if (pending != null) {
+      return pending;
+    }
+
+    final completer = Completer<void>();
+    _tesseractLoader = completer.future;
+
+    final script = html.ScriptElement()
+      ..src = _resolveWebAssetUrl(_tesseractScriptAsset)
+      ..defer = true
+      ..async = true;
+
+    late html.EventListener onLoad;
+    late html.EventListener onError;
+
+    onLoad = (_) {
+      script.removeEventListener('load', onLoad);
+      script.removeEventListener('error', onError);
+      final loaded = js_util.getProperty<Object?>(html.window, 'Tesseract');
+      if (loaded == null) {
+        _tesseractLoader = null;
+        completer.completeError(
+          StateError('No se pudo inicializar el OCR web.'),
+        );
+        return;
+      }
+      completer.complete();
+    };
+
+    onError = (_) {
+      script.removeEventListener('load', onLoad);
+      script.removeEventListener('error', onError);
+      _tesseractLoader = null;
+      completer.completeError(
+        StateError(
+          'No se pudo cargar el motor OCR web. Si no hay conexion, la captura OCR web no estara disponible.',
+        ),
+      );
+    };
+
+    script.addEventListener('load', onLoad);
+    script.addEventListener('error', onError);
+    html.document.head?.append(script);
+
+    return completer.future;
+  }
+
+  void _stopCamera() {
+    _analysisTimer?.cancel();
+    final stream = _mediaStream;
+    if (stream != null) {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+    }
+    _videoElement?.pause();
+    _videoElement?.srcObject = null;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Escaneo de INE'),
@@ -157,7 +489,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Captura con INE desde Safari',
+                      'Captura automatica de INE',
                       style: TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
@@ -176,7 +508,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
@@ -185,43 +517,103 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                     border: Border.all(color: const Color(0xFFE5E7EB)),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.all(22),
+                    padding: const EdgeInsets.all(18),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(
-                          Icons.badge_rounded,
-                          size: 72,
-                          color: Color(0xFF7A0C0C),
-                        ),
-                        const SizedBox(height: 18),
-                        const Text(
-                          'Toma la foto por ambos lados si necesitas validar mejor los datos antes de continuar.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 15,
-                            height: 1.45,
-                            color: Color(0xFF374151),
-                          ),
-                        ),
-                        const SizedBox(height: 28),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: _processing ? null : _pickFromCamera,
-                            icon: const Icon(Icons.camera_alt_outlined),
-                            label: Text(
-                              _processing ? 'Procesando...' : 'Tomar foto',
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(24),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                if (_cameraReady)
+                                  HtmlElementView(viewType: _viewId)
+                                else
+                                  Container(
+                                    color: const Color(0xFF111827),
+                                    alignment: Alignment.center,
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const CircularProgressIndicator(
+                                          color: Colors.white,
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Text(
+                                          _initializingCamera
+                                              ? 'Abriendo camara...'
+                                              : 'Camara no disponible',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                IgnorePointer(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(24),
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 2,
+                                      ),
+                                    ),
+                                    child: Center(
+                                      child: Container(
+                                        width: math.min(
+                                          MediaQuery.of(context).size.width *
+                                              0.72,
+                                          360,
+                                        ),
+                                        height: 220,
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(18),
+                                          border: Border.all(
+                                            color: const Color(0xFF8E1F2F),
+                                            width: 3,
+                                          ),
+                                          color: Colors.transparent,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: (!_cameraReady || _processing)
+                                    ? null
+                                    : _captureFromLiveCamera,
+                                icon: const Icon(Icons.camera_alt_outlined),
+                                label: const Text('Capturar ahora'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _processing ? null : _pickFromGallery,
+                                icon: const Icon(Icons.photo_library_outlined),
+                                label: const Text('Galeria'),
+                              ),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton.icon(
-                            onPressed: _processing ? null : _pickFromGallery,
-                            icon: const Icon(Icons.photo_library_outlined),
-                            label: const Text('Elegir desde galeria'),
+                        Text(
+                          'La captura automatica se activa cuando detectamos la INE centrada, enfocada y estable para enviar un recorte mas limpio al OCR.',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: const Color(0xFF6B7280),
+                            height: 1.4,
                           ),
                         ),
                       ],
