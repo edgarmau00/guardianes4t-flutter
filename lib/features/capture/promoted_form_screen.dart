@@ -191,6 +191,24 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     return rows.isNotEmpty;
   }
 
+  Future<bool> _existsPendingInLocalDb(String claveElectoral) async {
+    final db = await LocalDb.instance.database;
+
+    final rows = await db.query(
+      'promoted_records',
+      where: 'sync_status IN (?, ?)',
+      whereArgs: [0, 3],
+    );
+
+    final normalizedClave = claveElectoral.trim().toUpperCase();
+
+    return rows.any((row) {
+      final rowClave =
+          (row['clave_electoral'] ?? '').toString().trim().toUpperCase();
+      return rowClave == normalizedClave;
+    });
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -259,19 +277,34 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     setState(() => _saving = true);
 
     try {
-      final existsLocal = await _existsInLocalDb(clave);
-      if (existsLocal) {
-        _showSnack('Este ya se encuentra registrado');
-        return;
-      }
-
       final hasInternet = await _hasInternet();
+
       if (hasInternet) {
         final existsRemote =
             await ApiService().promotedExistsByClaveElectoral(clave);
         if (existsRemote) {
           _showSnack('Este ya se encuentra registrado');
           return;
+        }
+        final existsPendingLocal = await _existsPendingInLocalDb(clave);
+        if (existsPendingLocal) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+      } else {
+        final existsLocal = await _existsInLocalDb(clave);
+        if (existsLocal) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+
+        if (hasInternet) {
+          final existsRemote =
+              await ApiService().promotedExistsByClaveElectoral(clave);
+          if (existsRemote) {
+            _showSnack('Este ya se encuentra registrado');
+            return;
+          }
         }
       }
 

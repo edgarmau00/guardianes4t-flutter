@@ -93,6 +93,28 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     return rows.isNotEmpty;
   }
 
+  Future<bool> _existsPendingInLocalDb({
+    required String email,
+    required String phone,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    final rows = await db.query(
+      'leader_records',
+      where: 'sync_status IN (?, ?)',
+      whereArgs: [0, 3],
+    );
+
+    final normalizedEmail = email.trim().toLowerCase();
+    final normalizedPhone = phone.trim();
+
+    return rows.any((row) {
+      final rowEmail = (row['email'] ?? '').toString().trim().toLowerCase();
+      final rowPhone = (row['phone'] ?? '').toString().trim();
+      return rowEmail == normalizedEmail || rowPhone == normalizedPhone;
+    });
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -280,16 +302,20 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     setState(() => _saving = true);
 
     try {
-      final existsLocal = await _existsInLocalDb(email: email, phone: phone);
-      if (existsLocal) {
-        _showSnack('Este ya se encuentra registrado');
-        return;
-      }
-
       final hasInternet = await _hasInternet();
+
       if (hasInternet) {
         final existsRemote = await _existsInRemote(email: email, phone: phone);
         if (existsRemote) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+
+        final existsPendingLocal = await _existsPendingInLocalDb(
+          email: email,
+          phone: phone,
+        );
+        if (existsPendingLocal) {
           _showSnack('Este ya se encuentra registrado');
           return;
         }
@@ -298,6 +324,27 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         if (authExists) {
           _showSnack('El correo ya tiene un acceso creado');
           return;
+        }
+      } else {
+        final existsLocal = await _existsInLocalDb(email: email, phone: phone);
+        if (existsLocal) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+
+        if (hasInternet) {
+          final existsRemote =
+              await _existsInRemote(email: email, phone: phone);
+          if (existsRemote) {
+            _showSnack('Este ya se encuentra registrado');
+            return;
+          }
+
+          final authExists = await AuthService().leaderAccessExists(email);
+          if (authExists) {
+            _showSnack('El correo ya tiene un acceso creado');
+            return;
+          }
         }
       }
 
