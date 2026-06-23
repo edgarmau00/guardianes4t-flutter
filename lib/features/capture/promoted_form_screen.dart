@@ -209,6 +209,16 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     });
   }
 
+  Future<void> _clearSyncedLocalDuplicate(String claveElectoral) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'promoted_records',
+      where: 'sync_status = ? AND UPPER(clave_electoral) = ?',
+      whereArgs: [1, claveElectoral.trim().toUpperCase()],
+    );
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -286,6 +296,9 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
           _showSnack('Este ya se encuentra registrado');
           return;
         }
+
+        await _clearSyncedLocalDuplicate(clave);
+
         final existsPendingLocal = await _existsPendingInLocalDb(clave);
         if (existsPendingLocal) {
           _showSnack('Este ya se encuentra registrado');
@@ -296,15 +309,6 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
         if (existsLocal) {
           _showSnack('Este ya se encuentra registrado');
           return;
-        }
-
-        if (hasInternet) {
-          final existsRemote =
-              await ApiService().promotedExistsByClaveElectoral(clave);
-          if (existsRemote) {
-            _showSnack('Este ya se encuentra registrado');
-            return;
-          }
         }
       }
 

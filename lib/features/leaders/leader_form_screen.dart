@@ -115,6 +115,19 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     });
   }
 
+  Future<void> _clearSyncedLocalDuplicates({
+    required String email,
+    required String phone,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'leader_records',
+      where: 'sync_status = ? AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [1, email.trim().toLowerCase(), phone.trim()],
+    );
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -311,6 +324,14 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           return;
         }
 
+        final authExists = await AuthService().leaderAccessExists(email);
+        if (authExists) {
+          _showSnack('El correo ya tiene un acceso creado');
+          return;
+        }
+
+        await _clearSyncedLocalDuplicates(email: email, phone: phone);
+
         final existsPendingLocal = await _existsPendingInLocalDb(
           email: email,
           phone: phone,
@@ -319,32 +340,11 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           _showSnack('Este ya se encuentra registrado');
           return;
         }
-
-        final authExists = await AuthService().leaderAccessExists(email);
-        if (authExists) {
-          _showSnack('El correo ya tiene un acceso creado');
-          return;
-        }
       } else {
         final existsLocal = await _existsInLocalDb(email: email, phone: phone);
         if (existsLocal) {
           _showSnack('Este ya se encuentra registrado');
           return;
-        }
-
-        if (hasInternet) {
-          final existsRemote =
-              await _existsInRemote(email: email, phone: phone);
-          if (existsRemote) {
-            _showSnack('Este ya se encuentra registrado');
-            return;
-          }
-
-          final authExists = await AuthService().leaderAccessExists(email);
-          if (authExists) {
-            _showSnack('El correo ya tiene un acceso creado');
-            return;
-          }
         }
       }
 

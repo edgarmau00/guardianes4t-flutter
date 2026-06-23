@@ -244,9 +244,8 @@ class SyncService {
   Future<void> pullRemoteLeaders() async {
     final remote = ApiService();
     final rows = await remote.fetchLeadersByCurrentCapturist();
-    if (rows.isEmpty) return;
-
     final db = await LocalDb.instance.database;
+    await _pruneMissingRemoteLeaders(db: db, remoteRows: rows);
 
     for (final row in rows) {
       final localId = (row['local_id'] ?? '').toString().trim();
@@ -266,6 +265,64 @@ class SyncService {
         'leader_records',
         mergedRow,
         conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+  }
+
+  Future<void> _pruneMissingRemoteLeaders({
+    required Database db,
+    required List<Map<String, dynamic>> remoteRows,
+  }) async {
+    final uid = AuthService().currentUser?.uid ?? '';
+    if (uid.isEmpty) {
+      return;
+    }
+
+    final adminRole = await ApiService().fetchCurrentAdminRole();
+    String sessionRole = 'unknown';
+    if (adminRole.isNotEmpty) {
+      sessionRole = adminRole;
+    } else {
+      final profile = await ApiService().fetchCurrentLeaderProfile();
+      sessionRole = (profile?['leader_role'] ?? 'unknown').toString();
+    }
+
+    final remoteIds = remoteRows
+        .map((row) => (row['local_id'] ?? '').toString().trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    String whereClause;
+    List<Object?> whereArgs;
+
+    if (sessionRole == 'superadmin') {
+      whereClause = 'sync_status = ?';
+      whereArgs = [_statusSynced];
+    } else if (sessionRole == 'admin') {
+      whereClause = 'owner_admin_user_id = ? AND sync_status = ?';
+      whereArgs = [uid, _statusSynced];
+    } else {
+      whereClause = 'capturist_id = ? AND sync_status = ?';
+      whereArgs = [uid, _statusSynced];
+    }
+
+    final localRows = await db.query(
+      'leader_records',
+      columns: ['local_id'],
+      where: whereClause,
+      whereArgs: whereArgs,
+    );
+
+    for (final row in localRows) {
+      final localId = (row['local_id'] ?? '').toString().trim();
+      if (localId.isEmpty || remoteIds.contains(localId)) {
+        continue;
+      }
+
+      await db.delete(
+        'leader_records',
+        where: 'local_id = ?',
+        whereArgs: [localId],
       );
     }
   }
