@@ -21,6 +21,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   StreamSubscription<int>? _busSubscription;
+  int _statsLoadVersion = 0;
 
   int guardiansRegistered = 0;
   int leadersRegistered = 0;
@@ -84,6 +85,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _loadStats() async {
+    final loadVersion = ++_statsLoadVersion;
     final uid = AuthService().currentUser?.uid ?? '';
     final sessionRole = await _resolveSessionRole();
     final db = await LocalDb.instance.database;
@@ -242,7 +244,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           (whatsappGroupsTotal.first['total'] as int?) ?? 0;
     }
 
-    if (!mounted) return;
+    if (!mounted || loadVersion != _statsLoadVersion) return;
 
     setState(() {
       _sessionRole = sessionRole;

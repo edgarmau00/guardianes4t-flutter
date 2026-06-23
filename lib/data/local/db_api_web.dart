@@ -258,24 +258,31 @@ bool _matchesWhere(Map<String, dynamic> row, String? where, List<Object?> args) 
     return true;
   }
 
-  final orSegments = where.split(RegExp(r'\s+OR\s+', caseSensitive: false));
-  var argOffset = 0;
+  final normalizedWhere = _stripOuterParentheses(where.trim());
+  final orSegments = _splitTopLevel(normalizedWhere, 'OR');
 
   for (final orSegment in orSegments) {
-    final andSegments = orSegment.split(RegExp(r'\s+AND\s+', caseSensitive: false));
-    var localOffset = argOffset;
+    final andSegments = _splitTopLevel(orSegment, 'AND');
+    var localOffset = 0;
     var matches = true;
 
     for (final condition in andSegments) {
       final placeholderCount = RegExp(r'\?').allMatches(condition).length;
-      final conditionArgs = args.skip(localOffset).take(placeholderCount).toList();
+      final conditionArgs = args
+          .skip(localOffset)
+          .take(placeholderCount)
+          .toList();
       localOffset += placeholderCount;
-      if (!_matchesCondition(row, condition.trim(), conditionArgs)) {
+      if (!_matchesCondition(
+        row,
+        _stripOuterParentheses(condition.trim()),
+        conditionArgs,
+      )) {
         matches = false;
+        break;
       }
     }
 
-    argOffset = localOffset;
     if (matches) {
       return true;
     }
@@ -289,6 +296,8 @@ bool _matchesCondition(
   String condition,
   List<Object?> args,
 ) {
+  condition = _stripOuterParentheses(condition.trim());
+
   final upperMatch = RegExp(r'^UPPER\(([\w_]+)\)\s*=\s*\?$').firstMatch(condition);
   if (upperMatch != null) {
     final field = upperMatch.group(1)!;
@@ -316,7 +325,7 @@ bool _matchesCondition(
     return _sameValue(row[field], args.firstOrNull);
   }
 
-  return true;
+  return false;
 }
 
 bool _sameValue(dynamic left, dynamic right) {
@@ -326,4 +335,86 @@ bool _sameValue(dynamic left, dynamic right) {
     return leftNum == rightNum;
   }
   return (left ?? '').toString() == (right ?? '').toString();
+}
+
+List<String> _splitTopLevel(String expression, String operator) {
+  final parts = <String>[];
+  final buffer = StringBuffer();
+  final upperOperator = operator.toUpperCase();
+  var depth = 0;
+  var index = 0;
+
+  while (index < expression.length) {
+    final char = expression[index];
+
+    if (char == '(') {
+      depth++;
+      buffer.write(char);
+      index++;
+      continue;
+    }
+
+    if (char == ')') {
+      depth = depth > 0 ? depth - 1 : 0;
+      buffer.write(char);
+      index++;
+      continue;
+    }
+
+    if (depth == 0) {
+      final remaining = expression.substring(index);
+      final operatorMatch = RegExp(
+        '^\\s+$upperOperator\\s+',
+        caseSensitive: false,
+      ).firstMatch(remaining);
+
+      if (operatorMatch != null) {
+        final part = buffer.toString().trim();
+        if (part.isNotEmpty) {
+          parts.add(part);
+        }
+        buffer.clear();
+        index += operatorMatch.group(0)!.length;
+        continue;
+      }
+    }
+
+    buffer.write(char);
+    index++;
+  }
+
+  final lastPart = buffer.toString().trim();
+  if (lastPart.isNotEmpty) {
+    parts.add(lastPart);
+  }
+
+  return parts.isEmpty ? [expression.trim()] : parts;
+}
+
+String _stripOuterParentheses(String value) {
+  var result = value.trim();
+
+  while (result.startsWith('(') && result.endsWith(')')) {
+    var depth = 0;
+    var wrapsWholeExpression = true;
+
+    for (var i = 0; i < result.length; i++) {
+      final char = result[i];
+      if (char == '(') depth++;
+      if (char == ')') depth--;
+
+      if (depth == 0 && i < result.length - 1) {
+        wrapsWholeExpression = false;
+        break;
+      }
+    }
+
+    if (!wrapsWholeExpression) {
+      break;
+    }
+
+    result = result.substring(1, result.length - 1).trim();
+  }
+
+  return result;
 }
