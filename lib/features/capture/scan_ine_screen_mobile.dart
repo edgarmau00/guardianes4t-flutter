@@ -5,10 +5,14 @@ import 'package:camera/camera.dart';
 import 'package:doc_scan_flutter/doc_scan.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../../app/routes.dart';
+import '../../services/ios_native_ine_scanner.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ocr_validation_service.dart';
+import '../../services/web_ocr_parser.dart';
 
 class ScanIneScreen extends StatefulWidget {
   const ScanIneScreen({super.key});
@@ -24,9 +28,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
   bool _processing = false;
   bool _scannerOpened = false;
+  bool _openingNativeScanner = false;
   String _processingMessage = 'Procesando datos...';
 
   CameraController? _iosCameraController;
+  bool _iosManualFallbackMode = false;
   bool _iosCameraReady = false;
   bool _iosCameraInitializing = false;
   bool _iosCaptureInProgress = false;
@@ -41,8 +47,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     super.initState();
 
     if (Platform.isIOS) {
-      _initializeIosCamera();
-      return;
+      _processingMessage = 'Abriendo escaner inteligente...';
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -101,6 +106,28 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     } finally {
       _iosCameraInitializing = false;
     }
+  }
+
+  Future<void> _activateIosManualFallback([String? snackMessage]) async {
+    if (!Platform.isIOS) return;
+
+    if (mounted) {
+      setState(() {
+        _iosManualFallbackMode = true;
+        _processing = false;
+        _processingMessage = 'Procesando datos...';
+        _iosHint =
+            'Acomoda la INE dentro del recuadro. La captura sera automatica.';
+      });
+    }
+
+    if (snackMessage != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(snackMessage)),
+      );
+    }
+
+    await _initializeIosCamera();
   }
 
   Future<void> _disposeIosCamera() async {
@@ -385,7 +412,54 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   }
 
   Future<void> _scanWithDocumentScanner() async {
-    if (_processing) return;
+    if ((_processing && !Platform.isIOS) || _openingNativeScanner) return;
+
+    if (Platform.isIOS) {
+      _openingNativeScanner = true;
+
+      try {
+        if (mounted) {
+          setState(() {
+            _processing = true;
+            _processingMessage = 'Abriendo escaner inteligente...';
+          });
+        }
+
+        final nativeScan = await IosNativeIneScanner().scanIne();
+        if (nativeScan == null) {
+          if (mounted) {
+            setState(() => _processing = false);
+          }
+          return;
+        }
+
+        final nativeRaw = await WebOcrParser().parse(nativeScan.rawText);
+        nativeRaw['rawText'] = nativeScan.rawText;
+        nativeRaw['processingMode'] = nativeScan.source;
+
+        final success = await _processImagePath(
+          nativeScan.imagePath,
+          preferredRawResult: nativeRaw,
+        );
+
+        if (!success && mounted) {
+          await _activateIosManualFallback(
+            'La lectura nativa no quedo suficientemente clara. Cambiamos a captura automatica.',
+          );
+        }
+      } on PlatformException catch (_) {
+        await _activateIosManualFallback(
+          'El escaner nativo no estuvo disponible. Usaremos la camara automatica.',
+        );
+      } catch (_) {
+        await _activateIosManualFallback(
+          'El escaner nativo fallo. Usaremos la camara automatica.',
+        );
+      } finally {
+        _openingNativeScanner = false;
+      }
+      return;
+    }
 
     try {
       setState(() {
@@ -396,12 +470,20 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final result = await DocumentScanner.scan(format: DocScanFormat.jpeg);
       if (result == null || result.isEmpty) {
         if (!mounted) return;
-        setState(() => _processing = false);
+        setState(() {
+          _processing = false;
+        });
         return;
       }
 
       await _processImagePath(result.first);
     } on DocumentScannerException {
+      if (Platform.isIOS) {
+        await _activateIosManualFallback(
+          'No se pudo abrir el escaner inteligente. Cambiamos a captura automatica.',
+        );
+        return;
+      }
       if (!mounted) return;
       setState(() => _processing = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -410,6 +492,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         ),
       );
     } catch (_) {
+      if (Platform.isIOS) {
+        await _activateIosManualFallback(
+          'El escaner inteligente no estuvo disponible. Usaremos la camara automatica.',
+        );
+        return;
+      }
       if (!mounted) return;
       setState(() => _processing = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -420,7 +508,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
   }
 
-  Future<bool> _processImagePath(String imagePath) async {
+  Future<bool> _processImagePath(
+    String imagePath, {
+    Map<String, String>? preferredRawResult,
+  }) async {
     if (!mounted) return false;
 
     setState(() {
@@ -451,9 +542,40 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     });
 
     final ocr = OcrService();
+    final validator = OcrValidationService();
     try {
-      final rawResult = await ocr.scanIne(imagePath).timeout(_ocrTimeout);
-      final validation = OcrValidationService().validate(rawResult);
+      Map<String, String> rawResult;
+      OcrValidationResult validation;
+
+      if (Platform.isIOS) {
+        _IosOcrResult? bestResult;
+
+        if (preferredRawResult != null) {
+          final preferredValidation = validator.validate(preferredRawResult);
+          bestResult = _IosOcrResult(
+            rawResult: preferredRawResult,
+            validation: preferredValidation,
+          );
+        }
+
+        final refinedResult = await _scanIneWithIosRefinement(
+          ocr,
+          imagePath,
+        ).timeout(_ocrTimeout);
+
+        if (bestResult == null ||
+            _iosValidationScore(refinedResult.validation) >
+                _iosValidationScore(bestResult.validation)) {
+          bestResult = refinedResult;
+        }
+
+        rawResult = bestResult.rawResult;
+        validation = bestResult.validation;
+      } else {
+        rawResult = await ocr.scanIne(imagePath).timeout(_ocrTimeout);
+        validation = validator.validate(rawResult);
+      }
+
       final data = Map<String, dynamic>.from(validation.normalizedData);
 
       data['processingMode'] = rawResult['processingMode'] ?? 'ocr_only';
@@ -490,6 +612,118 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (mounted && !Platform.isIOS) {
         setState(() => _processing = false);
       }
+    }
+  }
+
+  Future<_IosOcrResult> _scanIneWithIosRefinement(
+    OcrService ocr,
+    String imagePath,
+  ) async {
+    final primaryRaw = await ocr.scanIne(imagePath);
+    final primaryValidation = OcrValidationService().validate(primaryRaw);
+
+    if (!_shouldRetryIosOcr(primaryValidation)) {
+      return _IosOcrResult(
+        rawResult: primaryRaw,
+        validation: primaryValidation,
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _processingMessage = 'Refinando lectura para iPhone...';
+      });
+    }
+
+    final enhancedPath = await _createIosEnhancedImage(imagePath);
+    if (enhancedPath == null) {
+      return _IosOcrResult(
+        rawResult: primaryRaw,
+        validation: primaryValidation,
+      );
+    }
+
+    try {
+      final refinedRaw = await ocr.scanIne(enhancedPath);
+      final refinedValidation = OcrValidationService().validate(refinedRaw);
+
+      if (_iosValidationScore(refinedValidation) >
+          _iosValidationScore(primaryValidation)) {
+        return _IosOcrResult(
+          rawResult: refinedRaw,
+          validation: refinedValidation,
+        );
+      }
+    } catch (_) {
+      // Si el refinado falla, conservamos el primer resultado.
+    }
+
+    return _IosOcrResult(
+      rawResult: primaryRaw,
+      validation: primaryValidation,
+    );
+  }
+
+  bool _shouldRetryIosOcr(OcrValidationResult validation) {
+    final normalized = validation.normalizedData;
+    final clave = (normalized['claveElectoral'] ?? '').trim();
+    final curp = (normalized['curp'] ?? '').trim();
+    final direccion = (normalized['direccion'] ?? '').trim();
+    final nombre = (normalized['nombre'] ?? '').trim();
+
+    if (validation.globalConfidence < 0.84) return true;
+    if (clave.isEmpty || curp.isEmpty) return true;
+    if (direccion.length < 10) return true;
+    if (nombre.length < 3) return true;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.90) return true;
+    if ((validation.confidence['curp'] ?? 0) < 0.90) return true;
+    return false;
+  }
+
+  double _iosValidationScore(OcrValidationResult validation) {
+    return validation.globalConfidence * 10 +
+        (validation.confidence['claveElectoral'] ?? 0.0) * 5 +
+        (validation.confidence['curp'] ?? 0.0) * 5 +
+        (validation.confidence['direccion'] ?? 0.0) * 3 +
+        (validation.confidence['nombre'] ?? 0.0) * 2 +
+        (validation.confidence['apellidoPaterno'] ?? 0.0) * 2 +
+        (validation.confidence['fechaNacimiento'] ?? 0.0) * 2 +
+        (validation.confidence['vigencia'] ?? 0.0) * 2 +
+        (validation.confidence['seccionElectoral'] ?? 0.0) * 1.5;
+  }
+
+  Future<String?> _createIosEnhancedImage(String imagePath) async {
+    try {
+      final bytes = await File(imagePath).readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+
+      var working = img.bakeOrientation(decoded);
+      if (working.width > 2200) {
+        working = img.copyResize(working, width: 2200);
+      }
+
+      final gray = img.grayscale(img.Image.from(working));
+      final enhanced = img.adjustColor(
+        gray,
+        contrast: 1.35,
+        brightness: 0.04,
+        gamma: 0.92,
+      );
+
+      final tempDir = await getTemporaryDirectory();
+      final refinedPath = p.join(
+        tempDir.path,
+        'ios_ocr_refined_${DateTime.now().microsecondsSinceEpoch}.jpg',
+      );
+
+      await File(refinedPath).writeAsBytes(
+        img.encodeJpg(enhanced, quality: 96),
+      );
+
+      return refinedPath;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -548,6 +782,64 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   }
 
   Widget _buildIosBody() {
+    if (!_iosManualFallbackMode) {
+      return Positioned.fill(
+        child: Container(
+          color: const Color(0xFFF4F4F5),
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Preparando escaneo inteligente en iPhone...',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Si el escaner nativo no abre, cambiaremos automaticamente a la captura con camara.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 15,
+                        height: 1.4,
+                        color: Color(0xFF4B5563),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _processing
+                            ? null
+                            : () => _activateIosManualFallback(),
+                        icon: const Icon(Icons.camera_alt_outlined),
+                        label: const Text('Usar captura automatica ahora'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     final controller = _iosCameraController;
 
     if (!_iosCameraReady || controller == null || !controller.value.isInitialized) {
@@ -720,5 +1012,15 @@ class _IosFrameSignal {
     required this.edgeScore,
     required this.contrast,
     required this.sample,
+  });
+}
+
+class _IosOcrResult {
+  final Map<String, String> rawResult;
+  final OcrValidationResult validation;
+
+  const _IosOcrResult({
+    required this.rawResult,
+    required this.validation,
   });
 }
