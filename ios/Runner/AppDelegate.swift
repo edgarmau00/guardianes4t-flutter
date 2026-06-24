@@ -206,7 +206,7 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     let resolutionBonus = min(width * height / 15000, 180)
     let landscapeBonus = width > height ? 40 : 0
 
-    return resolutionBonus + landscapeBonus - ratioPenalty
+    return resolutionBonus + Double(landscapeBonus) - ratioPenalty
   }
 
   private func recognizeBestText(from image: UIImage) -> String {

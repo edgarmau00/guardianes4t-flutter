@@ -13,6 +13,7 @@ import '../../services/ios_native_ine_scanner.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ocr_validation_service.dart';
 import '../../services/web_ocr_parser.dart';
+import 'package:flutter/services.dart';
 
 class ScanIneScreen extends StatefulWidget {
   const ScanIneScreen({super.key});
