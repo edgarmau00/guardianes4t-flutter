@@ -303,9 +303,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         _message = 'Leyendo texto con OCR web...';
       });
 
-      final rawText = await _runWebOcr(previewBytes).timeout(_ocrTimeout);
-      final parsed = await WebOcrParser().parse(rawText);
-      final validation = OcrValidationService().validate(parsed);
+      final bestResult =
+          await _runBestWebOcrPass(previewBytes).timeout(_ocrTimeout);
+      final rawText = bestResult.rawText;
+      final parsed = bestResult.parsed;
+      final validation = bestResult.validation;
       final normalized = Map<String, dynamic>.from(validation.normalizedData);
 
       if (!mounted) return;
@@ -359,6 +361,507 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
 
     return Uint8List.fromList(img.encodeJpg(normalized, quality: 90));
+  }
+
+  Future<_BestWebOcrResult> _runBestWebOcrPass(Uint8List bytes) async {
+    final variants = _buildOcrVariants(bytes);
+    final results = <_WebOcrVariantResult>[];
+
+    for (final variant in variants) {
+      try {
+        final rawText = await _runWebOcr(variant.bytes);
+        final parsed = await WebOcrParser().parse(rawText);
+        final validation = OcrValidationService().validate(parsed);
+        results.add(
+          _WebOcrVariantResult(
+            label: variant.label,
+            rawText: rawText,
+            parsed: parsed,
+            validation: validation,
+          ),
+        );
+      } finally {
+        if (!identical(variant.bytes, bytes)) {
+          _wipeBytes(variant.bytes);
+        }
+      }
+    }
+
+    if (results.isEmpty) {
+      throw StateError('No se pudo completar ninguna pasada OCR en web.');
+    }
+
+    results.sort(
+      (a, b) =>
+          b.validation.globalConfidence.compareTo(a.validation.globalConfidence),
+    );
+
+    final merged = _mergeVariantResults(results);
+    final zoneParsed = await _runZoneBasedParse(bytes);
+    final mergedWithZones = _mergePreferredFields(
+      merged,
+      zoneParsed,
+      preferredKeys: const [
+        'nombre',
+        'apellidoPaterno',
+        'apellidoMaterno',
+        'direccion',
+        'codigoPostal',
+        'municipio',
+        'estado',
+        'claveElectoral',
+        'claveElector',
+        'curp',
+        'fechaNacimiento',
+        'seccionElectoral',
+        'seccion',
+        'vigencia',
+        'sexo',
+      ],
+    );
+    final mergedValidation = OcrValidationService().validate(mergedWithZones);
+
+    return _BestWebOcrResult(
+      rawText: results.map((e) => '[${e.label}]\n${e.rawText}').join('\n\n'),
+      parsed: mergedWithZones,
+      validation: mergedValidation,
+    );
+  }
+
+  Future<Map<String, String>> _runZoneBasedParse(Uint8List bytes) async {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return const <String, String>{};
+
+    var base = decoded;
+    if (base.width < 2200) {
+      base = img.copyResize(base, width: 2200);
+    } else if (base.width > 2600) {
+      base = img.copyResize(base, width: 2600);
+    }
+
+    final zones = <String, img.Image>{
+      'name': _cropRelative(base, x: 0.28, y: 0.16, w: 0.37, h: 0.22),
+      'sexo': _cropRelative(base, x: 0.81, y: 0.16, w: 0.13, h: 0.10),
+      'domicilio': _cropRelative(base, x: 0.28, y: 0.36, w: 0.48, h: 0.22),
+      'clave': _cropRelative(base, x: 0.28, y: 0.55, w: 0.56, h: 0.08),
+      'curp': _cropRelative(base, x: 0.28, y: 0.63, w: 0.46, h: 0.08),
+      'fechaNacimiento': _cropRelative(base, x: 0.28, y: 0.73, w: 0.20, h: 0.09),
+      'seccion': _cropRelative(base, x: 0.55, y: 0.73, w: 0.12, h: 0.09),
+      'vigencia': _cropRelative(base, x: 0.68, y: 0.72, w: 0.19, h: 0.11),
+    };
+
+    final zoneTexts = <String, String>{};
+    for (final entry in zones.entries) {
+      final candidates = <String>[];
+      for (final variant in _buildZoneVariants(entry.value)) {
+        try {
+          final raw = await _runWebOcr(variant);
+          if (raw.trim().isNotEmpty) {
+            candidates.add(raw);
+          }
+        } finally {
+          _wipeBytes(variant);
+        }
+      }
+
+      zoneTexts[entry.key] = _pickBestZoneText(entry.key, candidates);
+    }
+
+    final syntheticText = _buildSyntheticIneText(zoneTexts);
+    if (syntheticText.trim().isEmpty) {
+      return const <String, String>{};
+    }
+
+    return WebOcrParser().parse(syntheticText);
+  }
+
+  List<_WebOcrImageVariant> _buildOcrVariants(Uint8List bytes) {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) {
+      return [_WebOcrImageVariant(label: 'base', bytes: bytes)];
+    }
+
+    img.Image prepareBase(img.Image source) {
+      var out = source;
+      if (out.width < 1800) {
+        out = img.copyResize(out, width: 1800);
+      } else if (out.width > 2400) {
+        out = img.copyResize(out, width: 2400);
+      }
+      return out;
+    }
+
+    Uint8List encode(img.Image image, {int quality = 92}) {
+      return Uint8List.fromList(img.encodeJpg(image, quality: quality));
+    }
+
+    final base = prepareBase(decoded);
+
+    final contrast = img.adjustColor(
+      base,
+      contrast: 1.24,
+      saturation: 0.92,
+      brightness: 1.02,
+      gamma: 0.98,
+    );
+
+    final sharpened = img.adjustColor(
+      img.gaussianBlur(base, radius: 1),
+      contrast: 1.34,
+      saturation: 0.84,
+      brightness: 1.01,
+      gamma: 0.96,
+    );
+
+    final grayscale = img.grayscale(base);
+    final grayscaleContrast = img.adjustColor(
+      grayscale,
+      contrast: 1.42,
+      brightness: 1.03,
+      gamma: 0.94,
+    );
+
+    final thresholded = _binarizeForOcr(grayscaleContrast);
+
+    return [
+      _WebOcrImageVariant(label: 'base', bytes: encode(base)),
+      _WebOcrImageVariant(label: 'contrast', bytes: encode(contrast)),
+      _WebOcrImageVariant(label: 'sharpened', bytes: encode(sharpened)),
+      _WebOcrImageVariant(
+        label: 'grayscale_contrast',
+        bytes: encode(grayscaleContrast),
+      ),
+      _WebOcrImageVariant(label: 'thresholded', bytes: encode(thresholded)),
+    ];
+  }
+
+  img.Image _binarizeForOcr(img.Image image) {
+    final out = img.copyResize(image, width: image.width, height: image.height);
+    var total = 0;
+    var count = 0;
+
+    for (var y = 0; y < out.height; y += 2) {
+      for (var x = 0; x < out.width; x += 2) {
+        total += out.getPixel(x, y).r.toInt();
+        count++;
+      }
+    }
+
+    final average = count == 0 ? 180 : (total / count).round();
+    final threshold = average.clamp(150, 205);
+
+    for (var y = 0; y < out.height; y++) {
+      for (var x = 0; x < out.width; x++) {
+        final pixel = out.getPixel(x, y);
+        final luminance = pixel.r.toInt();
+        final value = luminance >= threshold ? 255 : 0;
+        out.setPixelRgba(x, y, value, value, value, 255);
+      }
+    }
+
+    return out;
+  }
+
+  img.Image _cropRelative(
+    img.Image image, {
+    required double x,
+    required double y,
+    required double w,
+    required double h,
+  }) {
+    final left = (image.width * x).round().clamp(0, image.width - 1);
+    final top = (image.height * y).round().clamp(0, image.height - 1);
+    final width =
+        (image.width * w).round().clamp(1, image.width - left);
+    final height =
+        (image.height * h).round().clamp(1, image.height - top);
+    return img.copyCrop(image, x: left, y: top, width: width, height: height);
+  }
+
+  List<Uint8List> _buildZoneVariants(img.Image zone) {
+    final variants = <Uint8List>[];
+
+    img.Image prepare(img.Image source) {
+      var out = source;
+      if (out.width < 1200) {
+        out = img.copyResize(out, width: 1200);
+      }
+      return out;
+    }
+
+    Uint8List encode(img.Image image, {int quality = 95}) {
+      return Uint8List.fromList(img.encodeJpg(image, quality: quality));
+    }
+
+    final base = prepare(zone);
+    final gray = img.grayscale(base);
+    final highContrast = img.adjustColor(
+      gray,
+      contrast: 1.55,
+      brightness: 1.04,
+      gamma: 0.92,
+    );
+    final threshold = _binarizeForOcr(highContrast);
+
+    variants.add(encode(base));
+    variants.add(encode(highContrast));
+    variants.add(encode(threshold));
+    return variants;
+  }
+
+  String _pickBestZoneText(String field, List<String> candidates) {
+    final cleaned = candidates
+        .map((e) => _sanitizeZoneText(field, e))
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (cleaned.isEmpty) return '';
+
+    switch (field) {
+      case 'clave':
+        return _extractBestToken(
+              RegExp(r'[A-Z0-9]{17,19}'),
+              cleaned,
+            ) ??
+            '';
+      case 'curp':
+        return _extractBestToken(
+              RegExp(r'[A-Z]{4}[0-9OILSZBQ]{6}[HMN][A-Z]{5}[A-Z0-9]{2}'),
+              cleaned,
+            ) ??
+            '';
+      case 'fechaNacimiento':
+        return _extractBestToken(
+              RegExp(r'\b\d{2}[/-]\d{2}[/-]\d{4}\b'),
+              cleaned,
+            ) ??
+            cleaned.first;
+      case 'seccion':
+        return _extractBestToken(RegExp(r'\b\d{3,4}\b'), cleaned) ?? '';
+      case 'vigencia':
+        return _extractBestToken(
+              RegExp(r'\b20\d{2}\s*[-–]\s*20\d{2}\b'),
+              cleaned,
+            ) ??
+            '';
+      case 'sexo':
+        for (final candidate in cleaned) {
+          final normalized = candidate.toUpperCase().replaceAll(' ', '');
+          if (normalized.contains('SEXOH') || normalized == 'H') return 'H';
+          if (normalized.contains('SEXOM') || normalized == 'M') return 'M';
+        }
+        return '';
+      case 'name':
+      case 'domicilio':
+        cleaned.sort((a, b) => b.replaceAll('\n', ' ').length.compareTo(a.replaceAll('\n', ' ').length));
+        return cleaned.first;
+      default:
+        return cleaned.first;
+    }
+  }
+
+  String? _extractBestToken(RegExp regex, List<String> candidates) {
+    String? best;
+    for (final candidate in candidates) {
+      final upper = candidate.toUpperCase();
+      for (final match in regex.allMatches(upper)) {
+        final token = match.group(0)?.trim();
+        if (token == null || token.isEmpty) continue;
+        if (best == null || token.length > best.length) {
+          best = token;
+        }
+      }
+    }
+    return best;
+  }
+
+  String _sanitizeZoneText(String field, String value) {
+    var text = value.replaceAll('\r', '\n').trim().toUpperCase();
+
+    switch (field) {
+      case 'name':
+        text = text.replaceAll(RegExp(r'\bN0MBRE\b|\bNOMBRE\b'), '');
+        break;
+      case 'domicilio':
+        text = text.replaceAll(RegExp(r'\bD0MICILI0\b|\bDOMICILIO\b'), '');
+        break;
+      case 'clave':
+        text = text.replaceAll(
+          RegExp(r'\bCLAVE\s*DE\s*ELECT[O0]R\b|\bCLAVE\b'),
+          '',
+        );
+        break;
+      case 'curp':
+        text = text.replaceAll(RegExp(r'\bCURP\b'), '');
+        break;
+      case 'fechaNacimiento':
+        text = text.replaceAll(
+          RegExp(r'\bFECHA\s*DE\s*NACIMIENTO\b'),
+          '',
+        );
+        break;
+      case 'seccion':
+        text = text.replaceAll(RegExp(r'\bSECCI[O0]N\b'), '');
+        break;
+      case 'vigencia':
+        text = text.replaceAll(RegExp(r'\bVIGENCIA\b'), '');
+        break;
+      case 'sexo':
+        text = text.replaceAll(RegExp(r'\bSEXO\b'), '');
+        break;
+    }
+
+    return text
+        .replaceAllMapped(RegExp(r'[ \t]+'), (_) => ' ')
+        .replaceAll(RegExp(r'\n+'), '\n')
+        .trim();
+  }
+
+  String _buildSyntheticIneText(Map<String, String> zoneTexts) {
+    final lines = <String>[];
+
+    void addBlock(String label, String value) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) return;
+      lines.add(label);
+      lines.add(trimmed);
+    }
+
+    addBlock('NOMBRE', zoneTexts['name'] ?? '');
+    addBlock('DOMICILIO', zoneTexts['domicilio'] ?? '');
+    addBlock('CLAVE DE ELECTOR', zoneTexts['clave'] ?? '');
+    addBlock('CURP', zoneTexts['curp'] ?? '');
+    addBlock('FECHA DE NACIMIENTO', zoneTexts['fechaNacimiento'] ?? '');
+    addBlock('SECCION', zoneTexts['seccion'] ?? '');
+    addBlock('VIGENCIA', zoneTexts['vigencia'] ?? '');
+    addBlock('SEXO', zoneTexts['sexo'] ?? '');
+
+    return lines.join('\n');
+  }
+
+  Map<String, String> _mergePreferredFields(
+    Map<String, String> base,
+    Map<String, String> overlay, {
+    required List<String> preferredKeys,
+  }) {
+    final merged = Map<String, String>.from(base);
+
+    for (final key in preferredKeys) {
+      final candidate = (overlay[key] ?? '').trim();
+      if (candidate.isEmpty) continue;
+
+      final current = (merged[key] ?? '').trim();
+      if (current.isEmpty ||
+          _preferOverlayValue(key, candidate, current)) {
+        merged[key] = candidate;
+      }
+    }
+
+    if ((merged['claveElectoral'] ?? '').isNotEmpty) {
+      merged['claveElector'] = merged['claveElectoral']!;
+    }
+    if ((merged['seccionElectoral'] ?? '').isNotEmpty) {
+      merged['seccion'] = merged['seccionElectoral']!;
+    }
+
+    return merged;
+  }
+
+  bool _preferOverlayValue(String key, String candidate, String current) {
+    switch (key) {
+      case 'claveElectoral':
+      case 'claveElector':
+        return candidate.length >= current.length;
+      case 'curp':
+        return candidate.length >= current.length;
+      case 'fechaNacimiento':
+        return RegExp(r'^\d{2}/\d{2}/\d{4}$').hasMatch(candidate) &&
+            !RegExp(r'^\d{2}/\d{2}/\d{4}$').hasMatch(current);
+      case 'seccionElectoral':
+      case 'seccion':
+      case 'vigencia':
+      case 'sexo':
+        return true;
+      case 'nombre':
+      case 'apellidoPaterno':
+      case 'apellidoMaterno':
+      case 'direccion':
+      case 'municipio':
+      case 'estado':
+      case 'codigoPostal':
+        return candidate.length >= current.length;
+      default:
+        return false;
+    }
+  }
+
+  Map<String, String> _mergeVariantResults(List<_WebOcrVariantResult> results) {
+    final merged = Map<String, String>.from(results.first.parsed);
+    final bestScores = Map<String, double>.from(results.first.validation.confidence);
+
+    const mirroredKeys = {
+      'claveElector': 'claveElectoral',
+      'seccion': 'seccionElectoral',
+    };
+
+    for (final result in results.skip(1)) {
+      result.validation.confidence.forEach((key, score) {
+        final sourceKey = mirroredKeys[key] ?? key;
+        final existingScore = bestScores[sourceKey] ?? 0.0;
+        final candidateValue =
+            (result.validation.normalizedData[sourceKey] ??
+                    result.parsed[sourceKey] ??
+                    '')
+                .trim();
+
+        if (candidateValue.isEmpty) {
+          return;
+        }
+
+        final currentValue = (merged[sourceKey] ?? '').trim();
+        final shouldReplace =
+            score > existingScore + 0.05 ||
+            currentValue.isEmpty ||
+            (score >= existingScore &&
+                _preferLongerFieldValue(sourceKey, candidateValue, currentValue));
+
+        if (!shouldReplace) {
+          return;
+        }
+
+        merged[sourceKey] = candidateValue;
+        bestScores[sourceKey] = score;
+      });
+    }
+
+    if ((merged['claveElectoral'] ?? '').isNotEmpty) {
+      merged['claveElector'] = merged['claveElectoral']!;
+    }
+    if ((merged['seccionElectoral'] ?? '').isNotEmpty) {
+      merged['seccion'] = merged['seccionElectoral']!;
+    }
+
+    return merged;
+  }
+
+  bool _preferLongerFieldValue(
+    String key,
+    String candidate,
+    String current,
+  ) {
+    if (current.isEmpty) return true;
+    if (candidate == current) return false;
+
+    switch (key) {
+      case 'nombre':
+      case 'apellidoPaterno':
+      case 'apellidoMaterno':
+      case 'direccion':
+      case 'municipio':
+      case 'estado':
+        return candidate.length > current.length;
+      default:
+        return false;
+    }
   }
 
   void _wipeBytes(Uint8List buffer) {
@@ -627,4 +1130,40 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       ),
     );
   }
+}
+
+class _WebOcrImageVariant {
+  const _WebOcrImageVariant({
+    required this.label,
+    required this.bytes,
+  });
+
+  final String label;
+  final Uint8List bytes;
+}
+
+class _WebOcrVariantResult {
+  const _WebOcrVariantResult({
+    required this.label,
+    required this.rawText,
+    required this.parsed,
+    required this.validation,
+  });
+
+  final String label;
+  final String rawText;
+  final Map<String, String> parsed;
+  final OcrValidationResult validation;
+}
+
+class _BestWebOcrResult {
+  const _BestWebOcrResult({
+    required this.rawText,
+    required this.parsed,
+    required this.validation,
+  });
+
+  final String rawText;
+  final Map<String, String> parsed;
+  final OcrValidationResult validation;
 }

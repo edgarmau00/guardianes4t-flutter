@@ -1,0 +1,9 @@
+anio_registro
+clave_elector
+curp
+domicilio
+fecha_nacimiento
+nombre
+seccion
+sexo
+vigencia

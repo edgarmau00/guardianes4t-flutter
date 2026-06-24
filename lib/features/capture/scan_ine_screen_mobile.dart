@@ -25,7 +25,14 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
-  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 550);
+  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 700);
+  static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 550);
+  static const int _iosRequiredStableFrames = 5;
+  static const double _iosMotionThreshold = 7.5;
+  static const double _iosPreviewEdgeThreshold = 26;
+  static const double _iosPreviewContrastThreshold = 28;
+  static const double _iosBlockingBlurThreshold = 11.5;
+  static const double _iosWarningBlurThreshold = 15.5;
 
   bool _processing = false;
   bool _scannerOpened = false;
@@ -78,13 +85,14 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       final controller = CameraController(
         rearCamera,
-        ResolutionPreset.high,
+        ResolutionPreset.max,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
       await controller.initialize();
       await controller.setFlashMode(FlashMode.off);
+      await _configureIosCamera(controller);
 
       _iosCameraController = controller;
       _iosCameraReady = true;
@@ -177,9 +185,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       _iosPreviousLumaSample = signal.sample;
 
-      final hasEnoughDetail = signal.edgeScore > 18 && signal.contrast > 22;
+      final hasEnoughDetail =
+          signal.edgeScore > _iosPreviewEdgeThreshold &&
+          signal.contrast > _iosPreviewContrastThreshold;
       final brightnessOk = signal.brightness > 55 && signal.brightness < 215;
-      final isStable = motion < 11;
+      final isStable = motion < _iosMotionThreshold;
 
       if (hasEnoughDetail && brightnessOk && isStable) {
         _iosStableFrames += 1;
@@ -189,9 +199,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       if (!mounted) return;
 
-      if (_iosStableFrames >= 3) {
+      if (_iosStableFrames >= _iosRequiredStableFrames) {
         setState(() {
-          _iosHint = 'Documento estable. Tomando foto...';
+          _iosHint = 'Documento enfocado y estable. Tomando foto...';
         });
         await _takeSingleAutoPicture();
         return;
@@ -199,7 +209,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       final nextHint = hasEnoughDetail
           ? 'Manten la INE quieta dentro del recuadro...'
-          : 'Acerca la INE y encuadrala dentro del recuadro.';
+          : 'Ajusta distancia y enfoque. La INE debe verse nitida dentro del recuadro.';
 
       if (_iosHint != nextHint) {
         setState(() {
@@ -278,6 +288,34 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     return diff / length;
   }
 
+  Future<void> _configureIosCamera(CameraController controller) async {
+    try {
+      await controller.setFocusMode(FocusMode.auto);
+    } catch (_) {}
+
+    try {
+      await controller.setExposureMode(ExposureMode.auto);
+    } catch (_) {}
+
+    try {
+      await controller.setFocusPoint(const Offset(0.5, 0.5));
+    } catch (_) {}
+
+    try {
+      await controller.setExposurePoint(const Offset(0.5, 0.5));
+    } catch (_) {}
+  }
+
+  Future<void> _prepareIosFocusForCapture(CameraController controller) async {
+    await _configureIosCamera(controller);
+
+    try {
+      await controller.setZoomLevel(1.2);
+    } catch (_) {}
+
+    await Future.delayed(_iosPreCaptureFocusWait);
+  }
+
   Future<void> _takeSingleAutoPicture() async {
     final controller = _iosCameraController;
     if (!Platform.isIOS ||
@@ -295,6 +333,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         _iosStreaming = false;
         await controller.stopImageStream();
       }
+
+      await _prepareIosFocusForCapture(controller);
 
       setState(() {
         _processing = true;
@@ -391,10 +431,17 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         );
       }
 
-      if (avgEdge < 8) {
+      if (avgEdge < _iosBlockingBlurThreshold) {
+        return const _ImageQualityCheck(
+          blockingMessage:
+              'La imagen salio borrosa. Aleja un poco el telefono, mantén la INE fija y reintenta.',
+        );
+      }
+
+      if (avgEdge < _iosWarningBlurThreshold) {
         return const _ImageQualityCheck(
           warningMessage:
-              'La imagen se ve borrosa. Intentaremos leerla, pero podria fallar.',
+              'La imagen aun se ve algo suave. Si falla la lectura, aleja un poco el telefono y evita movimiento.',
         );
       }
 

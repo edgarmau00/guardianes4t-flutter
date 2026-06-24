@@ -137,6 +137,13 @@ class WebOcrParser {
         .toUpperCase();
 
     const replacements = {
+      'Á': 'A',
+      'É': 'E',
+      'Í': 'I',
+      'Ó': 'O',
+      'Ú': 'U',
+      'Ü': 'U',
+      'Ñ': 'N',
       'Ã': 'A',
       'Ã‰': 'E',
       'Ã': 'I',
@@ -154,8 +161,19 @@ class WebOcrParser {
       'SECCIQN': 'SECCION',
       'D0MICILI0': 'DOMICILIO',
       'D0M1C1L10': 'DOMICILIO',
+      'DOM1C1L10': 'DOMICILIO',
       'CURP.': 'CURP',
       'CLAVE DE ELECT0R': 'CLAVE DE ELECTOR',
+      'CLAVE ELECTOR': 'CLAVE DE ELECTOR',
+      'CLAVEDEELECTOR': 'CLAVE DE ELECTOR',
+      'CLAVEDE ELECTOR': 'CLAVE DE ELECTOR',
+      'AÑO DE REGISTRO': 'ANO DE REGISTRO',
+      'AÑO DE REGISTR0': 'ANO DE REGISTRO',
+      'ANO DE REGISTR0': 'ANO DE REGISTRO',
+      'FECHA DENACIMIENTO': 'FECHA DE NACIMIENTO',
+      'FECHADE NACIMIENTO': 'FECHA DE NACIMIENTO',
+      'FECHADENACIMIENTO': 'FECHA DE NACIMIENTO',
+      'SEX0': 'SEXO',
       'N0MBRE': 'NOMBRE',
     };
 
