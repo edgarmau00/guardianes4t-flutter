@@ -25,15 +25,15 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
-  static const Duration _iosCameraAutoStartDelay = Duration(milliseconds: 420);
+  static const Duration _iosCameraAutoStartDelay = Duration(milliseconds: 650);
   static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 180);
-  static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 520);
-  static const int _iosRequiredStableFrames = 1;
-  static const double _iosMotionThreshold = 16.5;
-  static const double _iosPreviewEdgeThreshold = 12.0;
-  static const double _iosPreviewContrastThreshold = 12.5;
-  static const double _iosBlockingBlurThreshold = 5.6;
-  static const double _iosWarningBlurThreshold = 7.8;
+  static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 900);
+  static const int _iosRequiredStableFrames = 3;
+  static const double _iosMotionThreshold = 10.5;
+  static const double _iosPreviewEdgeThreshold = 16.0;
+  static const double _iosPreviewContrastThreshold = 18.0;
+  static const double _iosBlockingBlurThreshold = 4.8;
+  static const double _iosWarningBlurThreshold = 6.9;
   static const double _iosOcrCropWidthFactor = 0.78;
   static const double _iosOcrCropHeightFactor = 0.30;
 
@@ -91,7 +91,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       final controller = CameraController(
         rearCamera,
-        ResolutionPreset.high,
+        Platform.isIOS ? ResolutionPreset.veryHigh : ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup:
             Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
@@ -329,6 +329,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   }
 
   Future<void> _prepareIosFocusForCapture(CameraController controller) async {
+    await _configureIosCamera(controller);
+    await Future.delayed(const Duration(milliseconds: 220));
     await _configureIosCamera(controller);
     await Future.delayed(_iosPreCaptureFocusWait);
   }
@@ -814,26 +816,34 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final curp = (normalized['curp'] ?? '').trim();
     final direccion = (normalized['direccion'] ?? '').trim();
     final nombre = (normalized['nombre'] ?? '').trim();
+    final apellidoPaterno = (normalized['apellidoPaterno'] ?? '').trim();
+    final fechaNacimiento = (normalized['fechaNacimiento'] ?? '').trim();
+    final seccionElectoral = (normalized['seccionElectoral'] ?? '').trim();
 
-    if (validation.globalConfidence < 0.84) return true;
+    if (validation.globalConfidence < 0.90) return true;
     if (clave.isEmpty || curp.isEmpty) return true;
-    if (direccion.length < 10) return true;
+    if (direccion.length < 18) return true;
     if (nombre.length < 3) return true;
-    if ((validation.confidence['claveElectoral'] ?? 0) < 0.90) return true;
-    if ((validation.confidence['curp'] ?? 0) < 0.90) return true;
+    if (apellidoPaterno.length < 3) return true;
+    if (fechaNacimiento.length < 8) return true;
+    if (seccionElectoral.length < 3) return true;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.93) return true;
+    if ((validation.confidence['curp'] ?? 0) < 0.93) return true;
+    if ((validation.confidence['direccion'] ?? 0) < 0.80) return true;
     return false;
   }
 
   double _iosValidationScore(OcrValidationResult validation) {
     return validation.globalConfidence * 10 +
-        (validation.confidence['claveElectoral'] ?? 0.0) * 5 +
-        (validation.confidence['curp'] ?? 0.0) * 5 +
-        (validation.confidence['direccion'] ?? 0.0) * 3 +
-        (validation.confidence['nombre'] ?? 0.0) * 2 +
-        (validation.confidence['apellidoPaterno'] ?? 0.0) * 2 +
-        (validation.confidence['fechaNacimiento'] ?? 0.0) * 2 +
-        (validation.confidence['vigencia'] ?? 0.0) * 2 +
-        (validation.confidence['seccionElectoral'] ?? 0.0) * 1.5;
+        (validation.confidence['claveElectoral'] ?? 0.0) * 6 +
+        (validation.confidence['curp'] ?? 0.0) * 6 +
+        (validation.confidence['direccion'] ?? 0.0) * 4 +
+        (validation.confidence['nombre'] ?? 0.0) * 3 +
+        (validation.confidence['apellidoPaterno'] ?? 0.0) * 3 +
+        (validation.confidence['apellidoMaterno'] ?? 0.0) * 2.5 +
+        (validation.confidence['fechaNacimiento'] ?? 0.0) * 3 +
+        (validation.confidence['vigencia'] ?? 0.0) * 2.5 +
+        (validation.confidence['seccionElectoral'] ?? 0.0) * 2;
   }
 
   Future<String?> _createIosEnhancedImage(String imagePath) async {
@@ -843,16 +853,29 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (decoded == null) return null;
 
       var working = img.bakeOrientation(decoded);
-      if (working.width > 2200) {
-        working = img.copyResize(working, width: 2200);
+      if (working.width > 2600) {
+        working = img.copyResize(working, width: 2600);
+      } else if (working.width < 2400) {
+        working = img.copyResize(working, width: 2400);
       }
 
-      final gray = img.grayscale(img.Image.from(working));
+      final normalized = img.adjustColor(
+        working,
+        contrast: 1.18,
+        brightness: 0.03,
+        gamma: 0.95,
+        saturation: 1.02,
+      );
+      final sharpened = img.convolution(
+        normalized,
+        filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+      );
+      final gray = img.grayscale(img.Image.from(sharpened));
       final enhanced = img.adjustColor(
         gray,
-        contrast: 1.35,
-        brightness: 0.04,
-        gamma: 0.92,
+        contrast: 1.42,
+        brightness: 0.02,
+        gamma: 0.90,
       );
 
       final tempDir = await getTemporaryDirectory();
@@ -884,7 +907,16 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final oriented = img.bakeOrientation(decoded);
       final results = <String>[imagePath];
       final tempDir = await getTemporaryDirectory();
+      final fullCardProfiles = <({double contrast, double brightness, double gamma, int width})>[
+        (contrast: 1.10, brightness: 0.02, gamma: 0.96, width: 2400),
+        (contrast: 1.22, brightness: 0.03, gamma: 0.92, width: 2600),
+      ];
       final profiles = <({double widthFactor, double heightFactor, double verticalCenter})>[
+        (
+          widthFactor: 0.92,
+          heightFactor: 0.58,
+          verticalCenter: 0.54,
+        ),
         (
           widthFactor: 0.82,
           heightFactor: 0.34,
@@ -901,6 +933,33 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           verticalCenter: 0.53,
         ),
       ];
+
+      for (int i = 0; i < fullCardProfiles.length; i++) {
+        final profile = fullCardProfiles[i];
+        final resized = oriented.width < profile.width
+            ? img.copyResize(oriented, width: profile.width)
+            : oriented.width > profile.width
+                ? img.copyResize(oriented, width: profile.width)
+                : oriented;
+        final adjusted = img.adjustColor(
+          resized,
+          contrast: profile.contrast,
+          brightness: profile.brightness,
+          gamma: profile.gamma,
+        );
+        final sharpened = img.convolution(
+          adjusted,
+          filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+        );
+        final fullPath = p.join(
+          tempDir.path,
+          'ios_manual_full_${i}_${DateTime.now().microsecondsSinceEpoch}.jpg',
+        );
+        await File(fullPath).writeAsBytes(
+          img.encodeJpg(sharpened, quality: 98),
+        );
+        results.add(fullPath);
+      }
 
       for (int i = 0; i < profiles.length; i++) {
         final profile = profiles[i];
@@ -932,16 +991,23 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
             ? img.copyResize(cropped, width: 2400)
             : cropped;
 
-        final enhanced = img.adjustColor(
+        final enhancedBase = img.adjustColor(
           normalized,
-          contrast: 1.18,
+          contrast: 1.24,
           brightness: 0.02,
-          gamma: 0.96,
+          gamma: 0.93,
         );
 
         final sharpened = img.convolution(
-          enhanced,
+          enhancedBase,
           filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+        );
+
+        final enhanced = img.adjustColor(
+          img.grayscale(img.Image.from(sharpened)),
+          contrast: 1.26,
+          brightness: 0.01,
+          gamma: 0.92,
         );
 
         final croppedPath = p.join(
