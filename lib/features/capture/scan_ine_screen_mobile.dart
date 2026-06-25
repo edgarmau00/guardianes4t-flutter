@@ -62,7 +62,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (!mounted || _scannerOpened) return;
       _scannerOpened = true;
       if (Platform.isIOS) {
-        _activateIosManualFallback();
+        Future<void>.delayed(const Duration(milliseconds: 350), () {
+          if (!mounted) return;
+          _scanWithDocumentScanner();
+        });
       } else {
         _scanWithDocumentScanner();
       }
@@ -89,9 +92,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       final controller = CameraController(
         rearCamera,
-        ResolutionPreset.max,
+        ResolutionPreset.veryHigh,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup:
+            Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
 
       await controller.initialize();
@@ -105,6 +109,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {});
       }
 
+      await Future<void>.delayed(const Duration(milliseconds: 180));
       await _startIosImageStream();
     } catch (_) {
       if (!mounted) return;

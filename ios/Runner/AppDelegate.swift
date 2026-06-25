@@ -81,11 +81,33 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
       return
     }
 
-    guard let presenter = topViewController(from: presenter) else {
+    guard let presenter = topViewController() else {
       result(
         FlutterError(
           code: "no_presenter",
           message: "No se encontro una vista para abrir el escaner.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard presenter.viewIfLoaded?.window != nil else {
+      result(
+        FlutterError(
+          code: "presenter_not_ready",
+          message: "La vista aun no esta lista para abrir el escaner.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    if presenter.presentedViewController != nil {
+      result(
+        FlutterError(
+          code: "presenter_busy",
+          message: "Ya existe otra vista presentada en este momento.",
           details: nil
         )
       )
@@ -97,7 +119,9 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     let scanner = VNDocumentCameraViewController()
     scanner.delegate = self
     documentCamera = scanner
-    presenter.present(scanner, animated: true)
+    DispatchQueue.main.async {
+      presenter.present(scanner, animated: true)
+    }
   }
 
   func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
@@ -376,14 +400,26 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     documentCamera = nil
   }
 
+  private func topViewController() -> UIViewController? {
+    let rootController =
+      UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap { $0.windows }
+        .first(where: { $0.isKeyWindow })?
+        .rootViewController ?? presenter
+
+    return topViewController(from: rootController)
+  }
+
   private func topViewController(from base: UIViewController?) -> UIViewController? {
+    guard let base else { return nil }
     if let navigation = base as? UINavigationController {
       return topViewController(from: navigation.visibleViewController)
     }
     if let tab = base as? UITabBarController {
       return topViewController(from: tab.selectedViewController)
     }
-    if let presented = base?.presentedViewController {
+    if let presented = base.presentedViewController {
       return topViewController(from: presented)
     }
     return base
