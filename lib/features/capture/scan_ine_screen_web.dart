@@ -26,6 +26,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   static const Duration _ocrTimeout = Duration(seconds: 45);
   static const Duration _analysisGap = Duration(milliseconds: 280);
   static const int _requiredStableFrames = 3;
+  static const String _visionScriptAsset = 'guardianes4t_vision.js';
   static const String _tesseractScriptAsset = 'ocr/tesseract.min.js';
   static const String _tesseractWorkerAsset = 'ocr/worker.min.js';
   static const String _tesseractLangAsset = 'ocr';
@@ -42,6 +43,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   Timer? _analysisTimer;
   DocumentRect? _lastDetectedRect;
   Future<void>? _tesseractLoader;
+  Future<void>? _visionLoader;
 
   bool _cameraReady = false;
   bool _processing = false;
@@ -86,8 +88,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         'audio': false,
         'video': <String, dynamic>{
           'facingMode': <String, dynamic>{'ideal': 'environment'},
-          'width': <String, dynamic>{'ideal': 1920},
-          'height': <String, dynamic>{'ideal': 1080},
+          'aspectRatio': <String, dynamic>{'ideal': 4 / 3},
+          'width': <String, dynamic>{'ideal': 2560},
+          'height': <String, dynamic>{'ideal': 1920},
         },
       };
 
@@ -100,9 +103,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       _videoElement = video;
       _mediaStream = stream;
-      _analysisCanvas = html.CanvasElement(width: 480, height: 300);
+      _analysisCanvas = html.CanvasElement(width: 960, height: 600);
 
       await _waitForVideoFrame(video);
+      await _ensureVisionLoaded();
       _startAnalysisLoop();
 
       if (!mounted) return;
@@ -239,11 +243,191 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (video == null || _processing) return;
     if (video.videoWidth <= 0 || video.videoHeight <= 0) return;
 
-    final bytes = _documentDetector.captureDocument(
-      video: video,
-      detectedRect: _lastDetectedRect,
-    );
+    final bytes = await _captureBestWebDocument(video);
     await _processImageBytes(bytes, sourceLabel: 'camara');
+  }
+
+  Future<Uint8List> _captureBestWebDocument(html.VideoElement video) async {
+    final sourceBytes =
+        await _captureStillPhotoBytes() ?? _capturePreviewFrameBytes(video);
+    final sourceCanvas = await _bytesToCanvas(sourceBytes);
+
+    try {
+      await _ensureVisionLoaded();
+      final vision = js_util.getProperty<Object?>(html.window, 'Guardianes4TVision');
+      if (vision != null) {
+        final detectionPromise = js_util.callMethod<Object?>(
+          vision,
+          'detectDocument',
+          [sourceCanvas],
+        );
+        final detection = detectionPromise == null
+            ? null
+            : await js_util.promiseToFuture<Object?>(detectionPromise);
+
+        final points = detection == null
+            ? null
+            : js_util.getProperty<Object?>(detection, 'points');
+
+        if (points != null) {
+          final perspectivePromise = js_util.callMethod<Object?>(
+            vision,
+            'cropPerspective',
+            [sourceCanvas, points],
+          );
+          final perspectiveUrl = perspectivePromise == null
+              ? null
+              : await js_util.promiseToFuture<Object?>(perspectivePromise);
+
+          if (perspectiveUrl is String && perspectiveUrl.isNotEmpty) {
+            return UriData.parse(perspectiveUrl).contentAsBytes();
+          }
+        }
+      }
+    } catch (_) {}
+
+    return _documentDetector.captureDocumentFromBytes(
+      imageBytes: sourceBytes,
+      detectedRect: _lastDetectedRect,
+      sourceWidth: sourceCanvas.width?.toDouble(),
+      sourceHeight: sourceCanvas.height?.toDouble(),
+    );
+  }
+
+  Future<Uint8List?> _captureStillPhotoBytes() async {
+    final stream = _mediaStream;
+    if (stream == null) return null;
+
+    final tracks = stream.getVideoTracks();
+    if (tracks.isEmpty) return null;
+
+    try {
+      final imageCaptureCtor =
+          js_util.getProperty<Object?>(html.window, 'ImageCapture');
+      if (imageCaptureCtor == null) {
+        return null;
+      }
+
+      final imageCapture = js_util.callConstructor<Object?>(
+        imageCaptureCtor,
+        [tracks.first],
+      );
+      if (imageCapture == null) {
+        return null;
+      }
+
+      final photoPromise = js_util.callMethod<Object?>(
+        imageCapture,
+        'takePhoto',
+        const [],
+      );
+      if (photoPromise == null) {
+        return null;
+      }
+      final photo = await js_util.promiseToFuture<Object?>(photoPromise);
+      if (photo is! html.Blob) {
+        return null;
+      }
+
+      return _blobToBytes(photo);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Uint8List _capturePreviewFrameBytes(html.VideoElement video) {
+    final canvas = html.CanvasElement(
+      width: video.videoWidth,
+      height: video.videoHeight,
+    );
+    canvas.context2D.drawImageScaled(
+      video,
+      0,
+      0,
+      canvas.width!,
+      canvas.height!,
+    );
+    final dataUrl = canvas.toDataUrl('image/png');
+    return UriData.parse(dataUrl).contentAsBytes();
+  }
+
+  Future<Uint8List> _blobToBytes(html.Blob blob) {
+    final completer = Completer<Uint8List>();
+    final reader = html.FileReader();
+
+    late html.EventListener onLoadEnd;
+    late html.EventListener onError;
+
+    onLoadEnd = (_) {
+      reader.removeEventListener('loadend', onLoadEnd);
+      reader.removeEventListener('error', onError);
+
+      final result = reader.result;
+      if (result is ByteBuffer) {
+        completer.complete(Uint8List.view(result));
+        return;
+      }
+
+      completer.completeError(
+        StateError('No se pudo convertir la foto de la camara.'),
+      );
+    };
+
+    onError = (_) {
+      reader.removeEventListener('loadend', onLoadEnd);
+      reader.removeEventListener('error', onError);
+      completer.completeError(
+        StateError('No se pudo leer la foto capturada.'),
+      );
+    };
+
+    reader.addEventListener('loadend', onLoadEnd);
+    reader.addEventListener('error', onError);
+    reader.readAsArrayBuffer(blob);
+
+    return completer.future;
+  }
+
+  Future<html.CanvasElement> _bytesToCanvas(Uint8List bytes) async {
+    final image = await _bytesToImage(bytes);
+    final canvas = html.CanvasElement(
+      width: image.width,
+      height: image.height,
+    );
+    canvas.context2D.drawImage(image, 0, 0);
+    return canvas;
+  }
+
+  Future<html.ImageElement> _bytesToImage(Uint8List bytes) {
+    final completer = Completer<html.ImageElement>();
+    final blob = html.Blob([bytes]);
+    final url = html.Url.createObjectUrlFromBlob(blob);
+    final image = html.ImageElement();
+
+    late html.EventListener onLoad;
+    late html.EventListener onError;
+
+    onLoad = (_) {
+      image.removeEventListener('load', onLoad);
+      image.removeEventListener('error', onError);
+      html.Url.revokeObjectUrl(url);
+      completer.complete(image);
+    };
+
+    onError = (_) {
+      image.removeEventListener('load', onLoad);
+      image.removeEventListener('error', onError);
+      html.Url.revokeObjectUrl(url);
+      completer.completeError(
+        StateError('No se pudo preparar la foto para OCR web.'),
+      );
+    };
+
+    image.addEventListener('load', onLoad);
+    image.addEventListener('error', onError);
+    image.src = url;
+
+    return completer.future;
   }
 
   Future<void> _pickFromGallery() async {
@@ -352,15 +536,25 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (decoded == null) return bytes;
 
     var normalized = decoded;
-    if (decoded.width > decoded.height) {
+    if (decoded.height > decoded.width) {
       normalized = img.copyRotate(decoded, angle: 90);
     }
 
-    if (normalized.width > 1800) {
+    if (normalized.width > 2400) {
+      normalized = img.copyResize(normalized, width: 2400);
+    } else if (normalized.width < 1800) {
       normalized = img.copyResize(normalized, width: 1800);
     }
 
-    return Uint8List.fromList(img.encodeJpg(normalized, quality: 90));
+    normalized = img.adjustColor(
+      normalized,
+      contrast: 1.12,
+      saturation: 0.94,
+      brightness: 1.01,
+      gamma: 0.98,
+    );
+
+    return Uint8List.fromList(img.encodePng(normalized, level: 1));
   }
 
   Future<_BestWebOcrResult> _runBestWebOcrPass(Uint8List bytes) async {
@@ -485,14 +679,14 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       var out = source;
       if (out.width < 1800) {
         out = img.copyResize(out, width: 1800);
-      } else if (out.width > 2400) {
-        out = img.copyResize(out, width: 2400);
+      } else if (out.width > 2800) {
+        out = img.copyResize(out, width: 2800);
       }
       return out;
     }
 
-    Uint8List encode(img.Image image, {int quality = 92}) {
-      return Uint8List.fromList(img.encodeJpg(image, quality: quality));
+    Uint8List encode(img.Image image) {
+      return Uint8List.fromList(img.encodePng(image, level: 1));
     }
 
     final base = prepareBase(decoded);
@@ -506,7 +700,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     );
 
     final sharpened = img.adjustColor(
-      img.gaussianBlur(base, radius: 1),
+      _sharpenForOcr(base),
       contrast: 1.34,
       saturation: 0.84,
       brightness: 1.01,
@@ -590,11 +784,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
 
     Uint8List encode(img.Image image, {int quality = 95}) {
-      return Uint8List.fromList(img.encodeJpg(image, quality: quality));
+      return Uint8List.fromList(img.encodePng(image, level: 1));
     }
 
     final base = prepare(zone);
     final gray = img.grayscale(base);
+    final sharpened = _sharpenForOcr(base);
     final highContrast = img.adjustColor(
       gray,
       contrast: 1.55,
@@ -604,9 +799,40 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final threshold = _binarizeForOcr(highContrast);
 
     variants.add(encode(base));
+    variants.add(encode(sharpened));
     variants.add(encode(highContrast));
     variants.add(encode(threshold));
     return variants;
+  }
+
+  img.Image _sharpenForOcr(img.Image image) {
+    final source = img.copyResize(image, width: image.width, height: image.height);
+    final blurred = img.gaussianBlur(source, radius: 1);
+    final out = img.Image.from(source);
+
+    for (var y = 0; y < source.height; y++) {
+      for (var x = 0; x < source.width; x++) {
+        final src = source.getPixel(x, y);
+        final blur = blurred.getPixel(x, y);
+
+        int boost(int original, int soft) {
+          return (original + ((original - soft) * 1.35))
+              .round()
+              .clamp(0, 255);
+        }
+
+        out.setPixelRgba(
+          x,
+          y,
+          boost(src.r.toInt(), blur.r.toInt()),
+          boost(src.g.toInt(), blur.g.toInt()),
+          boost(src.b.toInt(), blur.b.toInt()),
+          src.a.toInt(),
+        );
+      }
+    }
+
+    return out;
   }
 
   String _pickBestZoneText(String field, List<String> candidates) {
@@ -881,7 +1107,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       throw StateError('Tesseract no esta disponible en Web.');
     }
 
-    final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    final mimeType = _guessImageMimeType(bytes);
+    final dataUrl = 'data:$mimeType;base64,${base64Encode(bytes)}';
     final recognizePromise = js_util.callMethod(
       tesseract,
       'recognize',
@@ -899,6 +1126,17 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final data = js_util.getProperty(result!, 'data');
     final text = js_util.getProperty(data, 'text');
     return (text ?? '').toString().trim();
+  }
+
+  String _guessImageMimeType(Uint8List bytes) {
+    if (bytes.length >= 8 &&
+        bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      return 'image/png';
+    }
+    return 'image/jpeg';
   }
 
   Future<void> _ensureTesseractLoaded() {
@@ -945,6 +1183,60 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         StateError(
           'No se pudo cargar el motor OCR web. Si no hay conexion, la captura OCR web no estara disponible.',
         ),
+      );
+    };
+
+    script.addEventListener('load', onLoad);
+    script.addEventListener('error', onError);
+    html.document.head?.append(script);
+
+    return completer.future;
+  }
+
+  Future<void> _ensureVisionLoaded() {
+    final existing =
+        js_util.getProperty<Object?>(html.window, 'Guardianes4TVision');
+    if (existing != null) {
+      return Future.value();
+    }
+
+    final pending = _visionLoader;
+    if (pending != null) {
+      return pending;
+    }
+
+    final completer = Completer<void>();
+    _visionLoader = completer.future;
+
+    final script = html.ScriptElement()
+      ..src = _resolveWebAssetUrl(_visionScriptAsset)
+      ..defer = true
+      ..async = true;
+
+    late html.EventListener onLoad;
+    late html.EventListener onError;
+
+    onLoad = (_) {
+      script.removeEventListener('load', onLoad);
+      script.removeEventListener('error', onError);
+      final loaded =
+          js_util.getProperty<Object?>(html.window, 'Guardianes4TVision');
+      if (loaded == null) {
+        _visionLoader = null;
+        completer.completeError(
+          StateError('No se pudo inicializar el motor de vision web.'),
+        );
+        return;
+      }
+      completer.complete();
+    };
+
+    onError = (_) {
+      script.removeEventListener('load', onLoad);
+      script.removeEventListener('error', onError);
+      _visionLoader = null;
+      completer.completeError(
+        StateError('No se pudo cargar el motor de vision web.'),
       );
     };
 

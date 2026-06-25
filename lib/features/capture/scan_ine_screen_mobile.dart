@@ -55,13 +55,17 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     super.initState();
 
     if (Platform.isIOS) {
-      _processingMessage = 'Abriendo escaner inteligente...';
+      _processingMessage = 'Preparando camara...';
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _scannerOpened) return;
       _scannerOpened = true;
-      _scanWithDocumentScanner();
+      if (Platform.isIOS) {
+        _activateIosManualFallback();
+      } else {
+        _scanWithDocumentScanner();
+      }
     });
   }
 
@@ -977,6 +981,18 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                       : _takeSingleAutoPicture,
                   icon: const Icon(Icons.camera_alt_outlined),
                   label: const Text('Tomar ahora'),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _processing || _iosCaptureInProgress
+                      ? null
+                      : _scanWithDocumentScanner,
+                  icon: const Icon(Icons.document_scanner_outlined),
+                  label: const Text('Usar escaner inteligente'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Colors.white70),
+                  ),
                 ),
               ],
             ),

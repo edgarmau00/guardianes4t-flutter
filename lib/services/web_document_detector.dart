@@ -173,15 +173,39 @@ class WebDocumentDetector {
 
     final dataUrl = canvas.toDataUrl('image/jpeg', 0.96);
     final bytes = UriData.parse(dataUrl).contentAsBytes();
-    final decoded = img.decodeImage(bytes);
-    if (decoded == null || detectedRect == null) {
-      return bytes;
+    return captureDocumentFromBytes(
+      imageBytes: bytes,
+      detectedRect: detectedRect,
+      sourceWidth: video.videoWidth.toDouble(),
+      sourceHeight: video.videoHeight.toDouble(),
+    );
+  }
+
+  Uint8List captureDocumentFromBytes({
+    required Uint8List imageBytes,
+    required DocumentRect? detectedRect,
+    double? sourceWidth,
+    double? sourceHeight,
+  }) {
+    final decoded = img.decodeImage(imageBytes);
+    if (decoded == null) {
+      return imageBytes;
     }
 
-    var crop = detectedRect
+    final resolvedRect = detectedRect ?? _detectDocumentRectOnImage(decoded);
+
+    if (resolvedRect == null) {
+      var enhanced = _enhanceForOcr(decoded);
+      if (enhanced.width > 2400) {
+        enhanced = img.copyResize(enhanced, width: 2400);
+      }
+      return Uint8List.fromList(img.encodePng(enhanced, level: 2));
+    }
+
+    var crop = resolvedRect
         .scaleTo(
-          sourceWidth: video.videoWidth.toDouble(),
-          sourceHeight: video.videoHeight.toDouble(),
+          sourceWidth: sourceWidth ?? decoded.width.toDouble(),
+          sourceHeight: sourceHeight ?? decoded.height.toDouble(),
         )
         .inflatePercent(0.05);
 
@@ -207,11 +231,22 @@ class WebDocumentDetector {
     cropped = _trimSolidMargins(cropped);
     cropped = _enhanceForOcr(cropped);
 
-    if (cropped.width > 1800) {
-      cropped = img.copyResize(cropped, width: 1800);
+    if (cropped.width > 2400) {
+      cropped = img.copyResize(cropped, width: 2400);
     }
 
-    return Uint8List.fromList(img.encodeJpg(cropped, quality: 94));
+    return Uint8List.fromList(img.encodePng(cropped, level: 2));
+  }
+
+  DocumentRect? _detectDocumentRectOnImage(img.Image image) {
+    final rgba = Uint8ClampedList.fromList(
+      image.getBytes(order: img.ChannelOrder.rgba),
+    );
+    return _detectDocumentRect(
+      bytes: rgba,
+      width: image.width,
+      height: image.height,
+    );
   }
 
   DocumentRect? _detectDocumentRect({
