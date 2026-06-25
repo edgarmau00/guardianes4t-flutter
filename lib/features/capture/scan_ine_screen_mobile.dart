@@ -25,6 +25,7 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
+  static const Duration _iosCameraAutoStartDelay = Duration(milliseconds: 420);
   static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 180);
   static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 520);
   static const int _iosRequiredStableFrames = 1;
@@ -59,19 +60,14 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     if (Platform.isIOS) {
       _processingMessage = 'Preparando camara...';
+      _processing = false;
+      return;
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _scannerOpened) return;
       _scannerOpened = true;
-      if (Platform.isIOS) {
-        Future<void>.delayed(const Duration(milliseconds: 350), () {
-          if (!mounted) return;
-          _activateIosManualFallback();
-        });
-      } else {
-        _scanWithDocumentScanner();
-      }
+      _scanWithDocumentScanner();
     });
   }
 
@@ -95,7 +91,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       final controller = CameraController(
         rearCamera,
-        ResolutionPreset.max,
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup:
             Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
@@ -112,7 +108,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {});
       }
 
-      await Future<void>.delayed(const Duration(milliseconds: 180));
+      await Future<void>.delayed(_iosCameraAutoStartDelay);
       await _startIosImageStream();
     } catch (_) {
       if (!mounted) return;
@@ -179,56 +175,66 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     _iosLastAnalysisAt = null;
     _iosStableFrames = 0;
 
-    await controller.startImageStream((CameraImage image) async {
-      if (!_iosStreaming || _iosCaptureInProgress || _processing) return;
+    try {
+      await controller.startImageStream((CameraImage image) async {
+        if (!_iosStreaming || _iosCaptureInProgress || _processing) return;
 
-      final now = DateTime.now();
-      if (_iosLastAnalysisAt != null &&
-          now.difference(_iosLastAnalysisAt!) < _iosFrameAnalysisGap) {
-        return;
-      }
-      _iosLastAnalysisAt = now;
+        final now = DateTime.now();
+        if (_iosLastAnalysisAt != null &&
+            now.difference(_iosLastAnalysisAt!) < _iosFrameAnalysisGap) {
+          return;
+        }
+        _iosLastAnalysisAt = now;
 
-      final signal = _analyzeIosFrame(image);
-      final previous = _iosPreviousLumaSample;
-      final motion = previous == null
-          ? double.infinity
-          : _calculateMotion(previous, signal.sample);
+        final signal = _analyzeIosFrame(image);
+        final previous = _iosPreviousLumaSample;
+        final motion = previous == null
+            ? double.infinity
+            : _calculateMotion(previous, signal.sample);
 
-      _iosPreviousLumaSample = signal.sample;
+        _iosPreviousLumaSample = signal.sample;
 
-      final hasEnoughDetail =
-          signal.edgeScore > _iosPreviewEdgeThreshold &&
-          signal.contrast > _iosPreviewContrastThreshold;
-      final brightnessOk = signal.brightness > 45 && signal.brightness < 228;
-      final isStable = motion < _iosMotionThreshold;
+        final hasEnoughDetail =
+            signal.edgeScore > _iosPreviewEdgeThreshold &&
+            signal.contrast > _iosPreviewContrastThreshold;
+        final brightnessOk = signal.brightness > 45 && signal.brightness < 228;
+        final isStable = motion < _iosMotionThreshold;
 
-      if (hasEnoughDetail && brightnessOk && isStable) {
-        _iosStableFrames += 1;
-      } else {
-        _iosStableFrames = 0;
-      }
+        if (hasEnoughDetail && brightnessOk && isStable) {
+          _iosStableFrames += 1;
+        } else {
+          _iosStableFrames = 0;
+        }
 
+        if (!mounted) return;
+
+        if (_iosStableFrames >= _iosRequiredStableFrames) {
+          setState(() {
+            _iosHint = 'Documento listo. Tomando foto...';
+          });
+          await _takeSingleAutoPicture();
+          return;
+        }
+
+        final nextHint = hasEnoughDetail
+            ? 'Manten la INE centrada y quieta. Si se ve suave, alejala un poco.'
+            : 'Centra toda la INE. Si se ve borrosa, alejala un poco y evita mover el telefono.';
+
+        if (_iosHint != nextHint) {
+          setState(() {
+            _iosHint = nextHint;
+          });
+        }
+      });
+    } catch (_) {
+      _iosStreaming = false;
       if (!mounted) return;
-
-      if (_iosStableFrames >= _iosRequiredStableFrames) {
-        setState(() {
-          _iosHint = 'Documento listo. Tomando foto...';
-        });
-        await _takeSingleAutoPicture();
-        return;
-      }
-
-      final nextHint = hasEnoughDetail
-          ? 'Manten la INE centrada y quieta. Si se ve suave, alejala un poco.'
-          : 'Centra toda la INE. Si se ve borrosa, alejala un poco y evita mover el telefono.';
-
-      if (_iosHint != nextHint) {
-        setState(() {
-          _iosHint = nextHint;
-        });
-      }
-    });
+      setState(() {
+        _iosHint =
+            'La captura automatica no pudo iniciar. Puedes tomar la foto manualmente.';
+      });
+      return;
+    }
 
     _iosStreaming = true;
   }
@@ -1028,10 +1034,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const CircularProgressIndicator(),
-                    const SizedBox(height: 18),
                     const Text(
-                      'Preparando camara en iPhone...',
+                      'Captura de INE en iPhone',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 20,
@@ -1041,7 +1045,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                     ),
                     const SizedBox(height: 10),
                     const Text(
-                      'Abriremos la captura automatica directamente para evitar fallos al iniciar el escaneo.',
+                      'Elige como quieres iniciar. No abriremos la camara ni el escaner hasta que toques un boton.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 15,
@@ -1057,7 +1061,16 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                             ? null
                             : () => _activateIosManualFallback(),
                         icon: const Icon(Icons.camera_alt_outlined),
-                        label: const Text('Abrir camara ahora'),
+                        label: const Text('Abrir camara'),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: _processing ? null : _scanWithDocumentScanner,
+                        icon: const Icon(Icons.document_scanner_outlined),
+                        label: const Text('Usar escaner inteligente'),
                       ),
                     ),
                   ],
