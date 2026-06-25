@@ -6,18 +6,18 @@ import 'package:image/image.dart' as img;
 
 class WebDocumentDetector {
   static const double _targetAspect = 1.58;
-  static const double _minAreaRatio = 0.20;
+  static const double _minAreaRatio = 0.15;
   static const double _maxAreaRatio = 0.84;
-  static const double _maxAspectError = 0.32;
-  static const double _maxCenterDistance = 0.13;
-  static const double _minSharpness = 22.0;
-  static const double _minBrightness = 84.0;
-  static const double _maxBrightness = 206.0;
-  static const double _maxHighlightRatio = 0.085;
-  static const double _maxStabilityDelta = 0.070;
-  static const double _minContrast = 24.0;
-  static const double _minBorderStrength = 15.0;
-  static const double _minOutsideDelta = 7.0;
+  static const double _maxAspectError = 0.42;
+  static const double _maxCenterDistance = 0.18;
+  static const double _minSharpness = 14.0;
+  static const double _minBrightness = 70.0;
+  static const double _maxBrightness = 220.0;
+  static const double _maxHighlightRatio = 0.14;
+  static const double _maxStabilityDelta = 0.10;
+  static const double _minContrast = 16.0;
+  static const double _minBorderStrength = 10.0;
+  static const double _minOutsideDelta = 4.0;
 
   DocumentFrameAnalysis analyzeFrame({
     required html.VideoElement video,

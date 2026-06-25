@@ -24,8 +24,8 @@ class ScanIneScreen extends StatefulWidget {
 
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const Duration _ocrTimeout = Duration(seconds: 45);
-  static const Duration _analysisGap = Duration(milliseconds: 280);
-  static const int _requiredStableFrames = 3;
+  static const Duration _analysisGap = Duration(milliseconds: 240);
+  static const int _requiredStableFrames = 2;
   static const String _visionScriptAsset = 'guardianes4t_vision.js';
   static const String _tesseractScriptAsset = 'ocr/tesseract.min.js';
   static const String _tesseractWorkerAsset = 'ocr/worker.min.js';

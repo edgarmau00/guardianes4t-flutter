@@ -93864,7 +93864,7 @@ if(n.ax||!n.at||n.r==null){s=1
 break}o=n.ace()
 if(n.c==null){s=1
 break}n.ag(new A.azN(n,o))
-s=(o.b?++n.ch:n.ch=0)>=3?3:4
+s=(o.b?++n.ch:n.ch=0)>=2?3:4
 break
 case 3:n.ch=0
 s=5
@@ -97062,18 +97062,18 @@ g=i-(d+c)/2
 b=k-l-(s-a0)
 a=r-(c-d)
 e=Math.sqrt(h*h+g*g+b*b+a*a)}a0=(k-l)*r
-if(a0<0.2)return new A.fn("Acerca mas la INE al centro de la camara.",!1,p)
+if(a0<0.15)return new A.fn("Acerca mas la INE al centro de la camara.",!1,p)
 if(a0>0.84)return new A.fn("Aleja un poco la INE para capturarla completa.",!1,p)
-if(Math.abs(m-1.58)>0.32)return new A.fn("Endereza la INE para verla mas rectangular.",!1,p)
-if(f>0.13)return new A.fn("Mueve la INE un poco hacia el centro.",!1,p)
+if(Math.abs(m-1.58)>0.42)return new A.fn("Endereza la INE para verla mas rectangular.",!1,p)
+if(f>0.18)return new A.fn("Mueve la INE un poco hacia el centro.",!1,p)
 a0=o.a
-if(a0<84)return new A.fn("Falta luz. Acerca la INE a una zona mas iluminada.",!1,p)
-if(a0>206||o.c>0.085)return new A.fn("Hay reflejo o demasiada luz. Inclina un poco la INE.",!1,p)
-if(o.d<24)return new A.fn("La INE se ve plana. Acercala y evita fondos similares.",!1,p)
-if(o.e<15)return new A.fn("Marca mejor los bordes de la INE dentro del recuadro.",!1,p)
-if(Math.abs(a0-n.a)<7)return new A.fn("Se confunde con el fondo. Cambia un poco el angulo o el fondo.",!1,p)
-if(o.b<22)return new A.fn("Mantente quieto un momento para mejorar el enfoque.",!1,p)
-if(e>0.07)return new A.fn("No muevas la INE. Esperando estabilidad para capturar.",!1,p)
+if(a0<70)return new A.fn("Falta luz. Acerca la INE a una zona mas iluminada.",!1,p)
+if(a0>220||o.c>0.14)return new A.fn("Hay reflejo o demasiada luz. Inclina un poco la INE.",!1,p)
+if(o.d<16)return new A.fn("La INE se ve plana. Acercala y evita fondos similares.",!1,p)
+if(o.e<10)return new A.fn("Marca mejor los bordes de la INE dentro del recuadro.",!1,p)
+if(Math.abs(a0-n.a)<4)return new A.fn("Se confunde con el fondo. Cambia un poco el angulo o el fondo.",!1,p)
+if(o.b<14)return new A.fn("Mantente quieto un momento para mejorar el enfoque.",!1,p)
+if(e>0.1)return new A.fn("No muevas la INE. Esperando estabilidad para capturar.",!1,p)
 return new A.fn("INE detectada correctamente. Capturando automaticamente...",!0,p)},
 avh(a,a0,a1,a2){var s,r,q,p,o,n,m,l,k,j,i,h,g,f,e,d=this,c=null,b=A.aDB(a0)
 if(b==null)return a0
@@ -114643,8 +114643,8 @@ B.IM=new A.b9(2e4)
 B.V=new A.b9(2e5)
 B.kV=new A.b9(2e6)
 B.IN=new A.b9(225e3)
+B.IO=new A.b9(24e4)
 B.i1=new A.b9(25e4)
-B.IO=new A.b9(28e4)
 B.IP=new A.b9(2961926e3)
 B.cS=new A.b9(3e5)
 B.kW=new A.b9(35e4)
