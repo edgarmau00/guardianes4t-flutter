@@ -237,24 +237,35 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     let variants = imageVariants(from: image)
     var bestText = ""
     var bestScore = -Double.infinity
+    var collectedTexts: [(String, Double)] = []
 
     for variant in variants {
       let text = recognizeText(from: variant)
       let score = scoreRecognizedText(text)
+      if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        collectedTexts.append((text, score))
+      }
       if score > bestScore {
         bestScore = score
         bestText = text
       }
     }
 
-    return bestText
+    let mergedText = mergeRecognizedTexts(collectedTexts)
+    let mergedScore = scoreRecognizedText(mergedText)
+    return mergedScore >= bestScore ? mergedText : bestText
   }
 
   private func imageVariants(from image: UIImage) -> [UIImage] {
-    var variants: [UIImage] = [image]
+    let baseImage = normalizedImage(image)
+    var variants: [UIImage] = [baseImage]
+
+    if let upscaled = upscaleIfNeeded(baseImage, minimumLongSide: 2200) {
+      variants.append(upscaled)
+    }
 
     if let enhanced = applyFilters(
-      to: image,
+      to: baseImage,
       saturation: 0.0,
       contrast: 1.35,
       brightness: 0.03,
@@ -264,13 +275,34 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     }
 
     if let highContrast = applyFilters(
-      to: image,
+      to: baseImage,
       saturation: 0.0,
       contrast: 1.60,
       brightness: 0.01,
       sharpness: 0.85
     ) {
       variants.append(highContrast)
+    }
+
+    if let crisp = applyFilters(
+      to: baseImage,
+      saturation: 0.0,
+      contrast: 1.78,
+      brightness: -0.01,
+      sharpness: 1.15
+    ) {
+      variants.append(crisp)
+    }
+
+    if let denoised = applyFilters(
+      to: baseImage,
+      saturation: 0.0,
+      contrast: 1.48,
+      brightness: 0.02,
+      sharpness: 0.72,
+      noiseReduction: 0.02
+    ) {
+      variants.append(denoised)
     }
 
     return variants
@@ -281,7 +313,8 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     saturation: Double,
     contrast: Double,
     brightness: Double,
-    sharpness: Double
+    sharpness: Double,
+    noiseReduction: Double = 0.0
   ) -> UIImage? {
     guard let cgImage = image.cgImage else { return nil }
 
@@ -294,8 +327,19 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
 
     guard let adjusted = colorControls?.outputImage else { return nil }
 
+    let denoisedImage: CIImage
+    if noiseReduction > 0 {
+      let noiseFilter = CIFilter(name: "CINoiseReduction")
+      noiseFilter?.setValue(adjusted, forKey: kCIInputImageKey)
+      noiseFilter?.setValue(noiseReduction, forKey: "inputNoiseLevel")
+      noiseFilter?.setValue(0.40, forKey: "inputSharpness")
+      denoisedImage = noiseFilter?.outputImage ?? adjusted
+    } else {
+      denoisedImage = adjusted
+    }
+
     let sharpen = CIFilter(name: "CISharpenLuminance")
-    sharpen?.setValue(adjusted, forKey: kCIInputImageKey)
+    sharpen?.setValue(denoisedImage, forKey: kCIInputImageKey)
     sharpen?.setValue(sharpness, forKey: kCIInputSharpnessKey)
 
     guard
@@ -318,8 +362,33 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = false
-    request.minimumTextHeight = 0.012
+    request.minimumTextHeight = 0.008
     request.recognitionLanguages = ["es-MX", "es-ES", "en-US"]
+    request.customWords = [
+      "INSTITUTO",
+      "NACIONAL",
+      "ELECTORAL",
+      "CREDENCIAL",
+      "VOTAR",
+      "CLAVE",
+      "ELECTOR",
+      "CURP",
+      "DOMICILIO",
+      "SECCION",
+      "VIGENCIA",
+      "NACIMIENTO",
+      "REGISTRO",
+      "MEXICO",
+      "JARDINES",
+      "ZUMPANGO",
+      "MEX"
+    ]
+
+    if #available(iOS 16.0, *) {
+      request.revision = VNRecognizeTextRequestRevision3
+    } else if #available(iOS 15.0, *) {
+      request.revision = VNRecognizeTextRequestRevision2
+    }
 
     let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 
@@ -409,6 +478,59 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
         .rootViewController ?? presenter
 
     return topViewController(from: rootController)
+  }
+
+  private func mergeRecognizedTexts(_ texts: [(String, Double)]) -> String {
+    guard !texts.isEmpty else { return "" }
+
+    let ordered = texts.sorted { $0.1 > $1.1 }
+    var mergedLines: [String] = []
+    var seen = Set<String>()
+
+    for (text, _) in ordered {
+      let lines = text
+        .components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+      for line in lines {
+        let key = line
+          .uppercased()
+          .replacingOccurrences(of: " ", with: "")
+        if seen.contains(key) { continue }
+        seen.insert(key)
+        mergedLines.append(line)
+      }
+    }
+
+    return mergedLines.joined(separator: "\n")
+  }
+
+  private func normalizedImage(_ image: UIImage) -> UIImage {
+    guard image.imageOrientation != .up else { return image }
+
+    let renderer = UIGraphicsImageRenderer(size: image.size)
+    return renderer.image { _ in
+      image.draw(in: CGRect(origin: .zero, size: image.size))
+    }
+  }
+
+  private func upscaleIfNeeded(_ image: UIImage, minimumLongSide: CGFloat) -> UIImage? {
+    let longSide = max(image.size.width, image.size.height)
+    guard longSide > 0, longSide < minimumLongSide else { return nil }
+
+    let scale = minimumLongSide / longSide
+    let newSize = CGSize(
+      width: image.size.width * scale,
+      height: image.size.height * scale
+    )
+
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+    return renderer.image { _ in
+      image.draw(in: CGRect(origin: .zero, size: newSize))
+    }
   }
 
   private func topViewController(from base: UIViewController?) -> UIViewController? {

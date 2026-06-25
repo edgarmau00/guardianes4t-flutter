@@ -25,14 +25,14 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
-  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 700);
-  static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 550);
-  static const int _iosRequiredStableFrames = 5;
-  static const double _iosMotionThreshold = 7.5;
-  static const double _iosPreviewEdgeThreshold = 26;
-  static const double _iosPreviewContrastThreshold = 28;
-  static const double _iosBlockingBlurThreshold = 11.5;
-  static const double _iosWarningBlurThreshold = 15.5;
+  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 420);
+  static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 850);
+  static const int _iosRequiredStableFrames = 3;
+  static const double _iosMotionThreshold = 10.5;
+  static const double _iosPreviewEdgeThreshold = 18;
+  static const double _iosPreviewContrastThreshold = 18;
+  static const double _iosBlockingBlurThreshold = 7.2;
+  static const double _iosWarningBlurThreshold = 10.0;
 
   bool _processing = false;
   bool _scannerOpened = false;
@@ -197,7 +197,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final hasEnoughDetail =
           signal.edgeScore > _iosPreviewEdgeThreshold &&
           signal.contrast > _iosPreviewContrastThreshold;
-      final brightnessOk = signal.brightness > 55 && signal.brightness < 215;
+      final brightnessOk = signal.brightness > 45 && signal.brightness < 228;
       final isStable = motion < _iosMotionThreshold;
 
       if (hasEnoughDetail && brightnessOk && isStable) {
@@ -319,7 +319,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     await _configureIosCamera(controller);
 
     try {
-      await controller.setZoomLevel(1.2);
+      await controller.setZoomLevel(1.0);
     } catch (_) {}
 
     await Future.delayed(_iosPreCaptureFocusWait);
@@ -427,13 +427,13 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final avgBrightness = brightnessSum / samples;
       final avgEdge = edgeSum / samples;
 
-      if (avgBrightness < 38) {
+      if (avgBrightness < 30) {
         return const _ImageQualityCheck(
           warningMessage: 'La imagen se ve oscura. La lectura podria bajar.',
         );
       }
 
-      if (avgBrightness > 242) {
+      if (avgBrightness > 248) {
         return const _ImageQualityCheck(
           warningMessage:
               'La imagen tiene mucho brillo o reflejo. La lectura podria bajar.',
@@ -569,6 +569,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     String imagePath, {
     Map<String, String>? preferredRawResult,
   }) async {
+    final isNativeIosScan =
+        Platform.isIOS &&
+        (preferredRawResult?['processingMode'] ?? '').contains(
+          'ios_visionkit_native',
+        );
+
     if (!mounted) return false;
 
     setState(() {
@@ -578,12 +584,24 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     final qualityCheck = await _validateImageQuality(imagePath);
     if (qualityCheck.blockingMessage != null) {
-      if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(qualityCheck.blockingMessage!)),
-      );
-      setState(() => _processing = false);
-      return false;
+      if (isNativeIosScan) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${qualityCheck.blockingMessage!} Continuaremos con la revision manual del OCR.',
+              ),
+            ),
+          );
+        }
+      } else {
+        if (!mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(qualityCheck.blockingMessage!)),
+        );
+        setState(() => _processing = false);
+        return false;
+      }
     }
 
     if (qualityCheck.warningMessage != null && mounted) {
@@ -654,6 +672,29 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       );
       return true;
     } catch (_) {
+      if (isNativeIosScan && preferredRawResult != null && mounted) {
+        final fallbackValidation = validator.validate(preferredRawResult);
+        final data = Map<String, dynamic>.from(fallbackValidation.normalizedData);
+
+        data['processingMode'] =
+            preferredRawResult['processingMode'] ?? 'ios_visionkit_native';
+        data['globalConfidence'] = fallbackValidation.globalConfidence;
+
+        Navigator.pushReplacementNamed(
+          context,
+          AppRoutes.ocrReview,
+          arguments: {
+            ...data,
+            'warnings': fallbackValidation.warnings,
+            'confidence': fallbackValidation.confidence,
+            'imagePath': imagePath,
+            'rawText': preferredRawResult['rawText'] ?? '',
+            'globalConfidence': fallbackValidation.globalConfidence,
+          },
+        );
+        return true;
+      }
+
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
