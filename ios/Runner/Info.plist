@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Necesitamos acceder a la camara para capturar y escanear la credencial INE.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Necesitamos acceder al microfono como parte del funcionamiento del modulo de camara en iPhone.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Necesitamos guardar imagenes generadas por la aplicacion cuando el proceso lo requiera.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
