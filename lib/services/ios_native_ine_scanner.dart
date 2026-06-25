@@ -37,4 +37,25 @@ class IosNativeIneScanner {
       source: source,
     );
   }
+
+  Future<IosNativeIneScanResult?> processCapturedImage(String imagePath) async {
+    if (!Platform.isIOS || imagePath.trim().isEmpty) return null;
+
+    final raw = await _channel.invokeMethod<dynamic>('processCapturedIne', {
+      'imagePath': imagePath,
+    });
+    if (raw is! Map) return null;
+
+    final processedImagePath = (raw['imagePath'] ?? imagePath).toString();
+    final rawText = (raw['rawText'] ?? '').toString();
+    final source = (raw['source'] ?? 'ios_vision_still_image').toString();
+
+    if (processedImagePath.isEmpty) return null;
+
+    return IosNativeIneScanResult(
+      imagePath: processedImagePath,
+      rawText: rawText,
+      source: source,
+    );
+  }
 }

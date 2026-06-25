@@ -53,8 +53,59 @@ final class IosNativeIneScanner: NSObject, VNDocumentCameraViewControllerDelegat
     switch call.method {
     case "scanIne":
       startScan(result: result)
+    case "processCapturedIne":
+      processCapturedIne(call, result: result)
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private func processCapturedIne(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any] else {
+      result(
+        FlutterError(
+          code: "bad_args",
+          message: "No se recibieron argumentos validos.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let imagePath = (args["imagePath"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !imagePath.isEmpty else {
+      result(
+        FlutterError(
+          code: "missing_path",
+          message: "No se recibio la ruta de la imagen.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    guard let image = UIImage(contentsOfFile: imagePath) else {
+      result(
+        FlutterError(
+          code: "image_not_found",
+          message: "No se pudo abrir la imagen capturada.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { return }
+      let bestText = self.recognizeBestText(from: image)
+
+      DispatchQueue.main.async {
+        result([
+          "imagePath": imagePath,
+          "rawText": bestText,
+          "source": "ios_vision_still_image"
+        ])
+      }
     }
   }
 
