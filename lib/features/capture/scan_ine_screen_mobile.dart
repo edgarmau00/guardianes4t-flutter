@@ -67,7 +67,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (Platform.isIOS) {
         Future<void>.delayed(const Duration(milliseconds: 350), () {
           if (!mounted) return;
-          _scanWithDocumentScanner();
+          _activateIosManualFallback();
         });
       } else {
         _scanWithDocumentScanner();
@@ -1031,7 +1031,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                     const CircularProgressIndicator(),
                     const SizedBox(height: 18),
                     const Text(
-                      'Preparando escaneo inteligente en iPhone...',
+                      'Preparando camara en iPhone...',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 20,
@@ -1041,7 +1041,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                     ),
                     const SizedBox(height: 10),
                     const Text(
-                      'Si el escaner nativo no abre, cambiaremos automaticamente a la captura con camara.',
+                      'Abriremos la captura automatica directamente para evitar fallos al iniciar el escaneo.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 15,
@@ -1057,7 +1057,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                             ? null
                             : () => _activateIosManualFallback(),
                         icon: const Icon(Icons.camera_alt_outlined),
-                        label: const Text('Usar captura automatica ahora'),
+                        label: const Text('Abrir camara ahora'),
                       ),
                     ),
                   ],
