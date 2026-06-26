@@ -216,12 +216,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     await _configureIosCamera(controller);
     await Future.delayed(const Duration(milliseconds: 260));
     await _configureIosCamera(controller);
-    try {
-      await controller.setFocusMode(FocusMode.locked);
-    } catch (_) {}
-    try {
-      await controller.setExposureMode(ExposureMode.locked);
-    } catch (_) {}
     await Future.delayed(_iosPreCaptureFocusWait);
   }
 
@@ -238,11 +232,20 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     _iosCaptureInProgress = true;
 
     try {
+      if (!mounted) return;
+
       if (controller.value.isStreamingImages) {
         await controller.stopImageStream();
       }
 
       await _prepareIosFocusForCapture(controller);
+
+      if (!controller.value.isInitialized || controller.value.isTakingPicture) {
+        throw CameraException(
+          'ios_camera_not_ready',
+          'La camara aun no esta lista para capturar.',
+        );
+      }
 
       setState(() {
         _processing = true;
@@ -262,6 +265,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         return;
       }
     } catch (_) {
+      try {
+        await _iosCameraController?.dispose();
+      } catch (_) {}
+      _iosCameraController = null;
+      _iosCameraReady = false;
+
       if (mounted) {
         setState(() {
           _processing = false;
@@ -273,6 +282,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           ),
         );
       }
+
+      try {
+        await _initializeIosCamera();
+      } catch (_) {}
     } finally {
       _iosCaptureInProgress = false;
     }
@@ -415,7 +428,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     Map<String, String>? preferredRawResult,
   }) async {
     Map<String, String>? iosPreferredRawResult = preferredRawResult;
-    if (Platform.isIOS && iosPreferredRawResult == null) {
+    if (Platform.isIOS && iosPreferredRawResult == null && false) {
       try {
         final nativeStill = await IosNativeIneScanner().processCapturedImage(
           imagePath,
