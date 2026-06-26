@@ -692,7 +692,16 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       });
     }
 
-    for (final candidatePath in candidatePaths) {
+    final shouldTryExtraCandidate =
+        primaryValidation.globalConfidence < 0.82 ||
+        (primaryValidation.confidence['nombre'] ?? 0) < 0.72 ||
+        (primaryValidation.confidence['direccion'] ?? 0) < 0.72;
+
+    final limitedCandidatePaths = shouldTryExtraCandidate
+        ? candidatePaths.where((candidate) => candidate != imagePath).take(1)
+        : const <String>[];
+
+    for (final candidatePath in limitedCandidatePaths) {
       if (candidatePath == imagePath) continue;
 
       try {
@@ -732,23 +741,25 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       // Si el refinado falla, conservamos el mejor resultado previo.
     }
 
-    try {
-      final regionRecovered = await _recoverIosFieldsFromRegions(
-        ocr,
-        enhancedPath,
-        bestResult.rawResult,
-      );
-      final regionValidation = OcrValidationService().validate(regionRecovered);
-
-      if (_iosValidationScore(regionValidation) >=
-          _iosValidationScore(bestResult.validation)) {
-        bestResult = _IosOcrResult(
-          rawResult: regionRecovered,
-          validation: regionValidation,
+    if (_needsIosRegionRecovery(bestResult.validation)) {
+      try {
+        final regionRecovered = await _recoverIosFieldsFromRegions(
+          ocr,
+          enhancedPath,
+          bestResult.rawResult,
         );
+        final regionValidation = OcrValidationService().validate(regionRecovered);
+
+        if (_iosValidationScore(regionValidation) >=
+            _iosValidationScore(bestResult.validation)) {
+          bestResult = _IosOcrResult(
+            rawResult: regionRecovered,
+            validation: regionValidation,
+          );
+        }
+      } catch (_) {
+        // Si la lectura por zonas falla, mantenemos el mejor resultado vigente.
       }
-    } catch (_) {
-      // Si la lectura por zonas falla, mantenemos el mejor resultado vigente.
     }
 
     return bestResult;
@@ -778,6 +789,27 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if ((validation.confidence['direccion'] ?? 0) < 0.86) return true;
     if ((validation.confidence['fechaNacimiento'] ?? 0) < 0.90) return true;
     if ((validation.confidence['seccionElectoral'] ?? 0) < 0.88) return true;
+    return false;
+  }
+
+  bool _needsIosRegionRecovery(OcrValidationResult validation) {
+    final normalized = validation.normalizedData;
+    final nombre = (normalized['nombre'] ?? '').trim();
+    final apellidoPaterno = (normalized['apellidoPaterno'] ?? '').trim();
+    final apellidoMaterno = (normalized['apellidoMaterno'] ?? '').trim();
+    final direccion = (normalized['direccion'] ?? '').trim();
+    final clave = (normalized['claveElectoral'] ?? '').trim();
+    final curp = (normalized['curp'] ?? '').trim();
+
+    if (nombre.length < 3 || apellidoPaterno.length < 3 || apellidoMaterno.length < 3) {
+      return true;
+    }
+    if (direccion.length < 20) return true;
+    if (clave.length < 18 || curp.length < 18) return true;
+    if ((validation.confidence['nombre'] ?? 0) < 0.72) return true;
+    if ((validation.confidence['direccion'] ?? 0) < 0.72) return true;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.92) return true;
+    if ((validation.confidence['curp'] ?? 0) < 0.92) return true;
     return false;
   }
 
@@ -887,9 +919,29 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     ).firstMatch(upperText);
 
     final extracted = (nombreBlock?.group(1) ?? data['nombre'] ?? '').trim();
-    final cleanedExtracted = _cleanIosPersonText(extracted);
+    final cleanedExtracted = _stripIosNameNoise(extracted);
 
     if (cleanedExtracted.isEmpty) return;
+
+    final blockLines = extracted
+        .split(RegExp(r'[\r\n]+'))
+        .map(_stripIosNameNoise)
+        .where((line) => line.isNotEmpty)
+        .where((line) => !_isIosNoiseLine(line))
+        .toList();
+
+    if (blockLines.length >= 3) {
+      if (currentPaterno.isEmpty) {
+        data['apellidoPaterno'] = blockLines[0];
+      }
+      if (currentMaterno.isEmpty) {
+        data['apellidoMaterno'] = blockLines[1];
+      }
+      if (currentNombre.isEmpty) {
+        data['nombre'] = blockLines.sublist(2).join(' ').trim();
+      }
+      return;
+    }
 
     final tokens = cleanedExtracted
         .split(RegExp(r'\s+'))
@@ -898,7 +950,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           (token) =>
               token.isNotEmpty &&
               token.length > 1 &&
-              !RegExp(r'^\d+$').hasMatch(token),
+              !RegExp(r'^\d+$').hasMatch(token) &&
+              !_isIosNoiseToken(token),
         )
         .toList();
 
@@ -926,7 +979,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     ].where((value) => value.trim().isNotEmpty).join(' ').trim();
 
     if (rebuilt.isNotEmpty) {
-      final rebuiltTokens = _cleanIosPersonText(rebuilt)
+      final rebuiltTokens = _stripIosNameNoise(rebuilt)
           .split(RegExp(r'\s+'))
           .where((token) => token.trim().isNotEmpty)
           .toList();
@@ -951,10 +1004,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     ).firstMatch(upperText);
 
     if (currentAddress.isEmpty && domicilioMatch != null) {
-      data['direccion'] = _cleanIosAddressText(domicilioMatch.group(1)!);
+      data['direccion'] = _stripIosAddressNoise(domicilioMatch.group(1)!);
     }
 
-    final addressSource = _cleanIosAddressText((data['direccion'] ?? '').trim());
+    final addressSource = _stripIosAddressNoise((data['direccion'] ?? '').trim());
     if (addressSource.isEmpty) return;
 
     data['direccion'] = addressSource;
@@ -1107,6 +1160,65 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         .trim();
   }
 
+  String _stripIosNameNoise(String value) {
+    return _cleanIosPersonText(value)
+        .replaceAll(
+          RegExp(
+            r'\b(?:INSTITUTO|NACIONAL|ELECTORAL|CREDENCIAL|PARA|VOTAR|MEXICO|SEXO|DOMICILIO|CURP|CLAVE|ELECTOR|ANO|AÑO|REGISTRO|FECHA|NACIMIENTO|SECCION|SECCIÓN|VIGENCIA|ESTADO|UNIDOS|MEXICANOS)\b',
+          ),
+          ' ',
+        )
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _stripIosAddressNoise(String value) {
+    return _cleanIosAddressText(value)
+        .replaceAll(
+          RegExp(
+            r'\b(?:INSTITUTO|NACIONAL|ELECTORAL|CREDENCIAL|PARA|VOTAR|MEXICO|NOMBRE|SEXO|CURP|CLAVE|ELECTOR|ANO|AÑO|REGISTRO|FECHA|NACIMIENTO|SECCION|SECCIÓN|VIGENCIA)\b',
+          ),
+          ' ',
+        )
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  bool _isIosNoiseLine(String value) {
+    final normalized = _stripIosNameNoise(value);
+    if (normalized.isEmpty) return true;
+    if (normalized.length < 3) return true;
+    if (RegExp(r'^\d+$').hasMatch(normalized)) return true;
+    return const {
+      'INSTITUTO',
+      'NACIONAL',
+      'ELECTORAL',
+      'CREDENCIAL',
+      'PARA',
+      'VOTAR',
+      'MEXICO',
+      'SEXO',
+      'DOMICILIO',
+      'CURP',
+      'CLAVE',
+      'ELECTOR',
+      'ANO',
+      'AÑO',
+      'REGISTRO',
+      'FECHA',
+      'NACIMIENTO',
+      'SECCION',
+      'SECCIÓN',
+      'VIGENCIA',
+    }.contains(normalized);
+  }
+
+  bool _isIosNoiseToken(String value) {
+    final normalized = _stripIosNameNoise(value);
+    if (normalized.isEmpty) return true;
+    return _isIosNoiseLine(normalized);
+  }
+
   String _normalizeIosClaveElectoral(String current, String rawText) {
     final currentCompact =
         _normalizeIosOcrText(current).replaceAll(RegExp(r'[^A-Z0-9]'), '');
@@ -1224,10 +1336,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (decoded == null) return null;
 
       var working = img.bakeOrientation(decoded);
-      if (working.width > 3000) {
-        working = img.copyResize(working, width: 3000);
-      } else if (working.width < 2800) {
-        working = img.copyResize(working, width: 2800);
+      if (working.width > 2600) {
+        working = img.copyResize(working, width: 2600);
+      } else if (working.width < 2200) {
+        working = img.copyResize(working, width: 2200);
       }
 
       final normalized = img.adjustColor(
@@ -1277,10 +1389,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (decoded == null) return baseRaw;
 
     var working = img.bakeOrientation(decoded);
-    if (working.width < 3200) {
-      working = img.copyResize(working, width: 3200);
-    } else if (working.width > 3600) {
-      working = img.copyResize(working, width: 3600);
+    if (working.width < 2400) {
+      working = img.copyResize(working, width: 2400);
+    } else if (working.width > 2800) {
+      working = img.copyResize(working, width: 2800);
     }
 
     final merged = Map<String, String>.from(baseRaw);
@@ -1293,43 +1405,30 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         <String, List<({String id, double x, double y, double w, double h})>>{
       'nombreBloque': [
         (id: 'name_main', x: 0.29, y: 0.16, w: 0.39, h: 0.24),
-        (id: 'name_tight', x: 0.31, y: 0.17, w: 0.35, h: 0.21),
-        (id: 'name_wide', x: 0.28, y: 0.15, w: 0.43, h: 0.25),
       ],
       'direccion': [
         (id: 'address_main', x: 0.29, y: 0.36, w: 0.47, h: 0.20),
-        (id: 'address_tight', x: 0.30, y: 0.38, w: 0.44, h: 0.17),
-        (id: 'address_wide', x: 0.27, y: 0.35, w: 0.51, h: 0.21),
       ],
       'claveElectoral': [
         (id: 'clave_main', x: 0.29, y: 0.52, w: 0.58, h: 0.09),
-        (id: 'clave_tight', x: 0.33, y: 0.53, w: 0.52, h: 0.08),
-        (id: 'clave_right', x: 0.43, y: 0.52, w: 0.43, h: 0.09),
       ],
       'curp': [
         (id: 'curp_main', x: 0.29, y: 0.59, w: 0.49, h: 0.09),
-        (id: 'curp_tight', x: 0.31, y: 0.60, w: 0.45, h: 0.08),
-        (id: 'curp_wide', x: 0.27, y: 0.58, w: 0.54, h: 0.10),
       ],
       'fechaNacimiento': [
         (id: 'birth_main', x: 0.29, y: 0.69, w: 0.29, h: 0.10),
-        (id: 'birth_tight', x: 0.31, y: 0.70, w: 0.24, h: 0.08),
       ],
       'seccionElectoral': [
         (id: 'section_main', x: 0.56, y: 0.68, w: 0.14, h: 0.10),
-        (id: 'section_tight', x: 0.57, y: 0.70, w: 0.12, h: 0.08),
       ],
       'vigencia': [
         (id: 'vigencia_main', x: 0.66, y: 0.67, w: 0.20, h: 0.11),
-        (id: 'vigencia_tight', x: 0.68, y: 0.69, w: 0.17, h: 0.09),
       ],
       'sexo': [
         (id: 'sexo_main', x: 0.76, y: 0.15, w: 0.15, h: 0.09),
-        (id: 'sexo_tight', x: 0.79, y: 0.16, w: 0.10, h: 0.07),
       ],
       'metaDerecha': [
         (id: 'meta_right_main', x: 0.55, y: 0.50, w: 0.33, h: 0.30),
-        (id: 'meta_right_tight', x: 0.59, y: 0.54, w: 0.25, h: 0.24),
       ],
     };
 
