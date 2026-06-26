@@ -5,6 +5,7 @@ import 'package:camera/camera.dart';
 import 'package:doc_scan_flutter/doc_scan.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -34,6 +35,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   bool _scannerOpened = false;
   bool _openingNativeScanner = false;
   String _processingMessage = 'Procesando datos...';
+  final ImagePicker _iosImagePicker = ImagePicker();
 
   CameraController? _iosCameraController;
   bool _iosManualFallbackMode = false;
@@ -68,24 +70,33 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
   Future<void> _initializeIosCamera() async {
     if (!Platform.isIOS || _iosCameraInitializing) return;
+    if (_iosCameraReady &&
+        _iosCameraController != null &&
+        _iosCameraController!.value.isInitialized) {
+      return;
+    }
 
     _iosCameraInitializing = true;
 
     try {
+      await _disposeIosCamera();
+
       final cameras = await availableCameras();
       final rearCamera = _selectBestIosRearCamera(cameras);
 
       final controller = CameraController(
         rearCamera,
-        Platform.isIOS ? ResolutionPreset.max : ResolutionPreset.high,
+        ResolutionPreset.veryHigh,
         enableAudio: false,
-        imageFormatGroup:
-            Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
 
       await controller.initialize();
-      await controller.setFlashMode(FlashMode.off);
-      await _configureIosCamera(controller);
+      try {
+        await controller.setFlashMode(FlashMode.off);
+      } catch (_) {}
+      try {
+        await _configureIosCamera(controller);
+      } catch (_) {}
 
       _iosCameraController = controller;
       _iosCameraReady = true;
@@ -114,11 +125,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     if (mounted) {
       setState(() {
-        _iosManualFallbackMode = true;
+        _iosManualFallbackMode = false;
         _processing = false;
         _processingMessage = 'Procesando datos...';
         _iosHint =
-            'Acomoda la INE dentro del recuadro. Manten unos 18 a 26 cm de distancia y toca "Tomar ahora" cuando el texto se vea claro.';
+            'Se abrira la camara nativa de iPhone. Centra toda la INE y toma la foto cuando el texto se vea nitido.';
       });
     }
 
@@ -128,7 +139,61 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       );
     }
 
-    await _initializeIosCamera();
+    await _captureWithIosNativeCamera();
+  }
+
+  Future<void> _captureWithIosNativeCamera() async {
+    if (!Platform.isIOS || _processing || _iosCaptureInProgress) return;
+
+    _iosCaptureInProgress = true;
+
+    try {
+      final picked = await _iosImagePicker.pickImage(
+        source: ImageSource.camera,
+        preferredCameraDevice: CameraDevice.rear,
+        imageQuality: 100,
+        requestFullMetadata: false,
+      );
+
+      if (picked == null) {
+        if (mounted) {
+          setState(() {
+            _processing = false;
+            _iosHint =
+                'Captura cancelada. Vuelve a abrir la camara cuando tengas la INE lista.';
+          });
+        }
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _processing = true;
+        _processingMessage = 'Procesando imagen...';
+      });
+
+      final success = await _processImagePath(picked.path);
+      if (!success && mounted) {
+        setState(() {
+          _processing = false;
+          _iosHint =
+              'No se pudo leer bien la INE. Toma otra foto con mejor luz y manteniendo visible toda la credencial.';
+        });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _processing = false;
+        _iosHint = 'No se pudo abrir la camara de iPhone. Intenta de nuevo.';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No se pudo abrir la camara en iPhone.'),
+        ),
+      );
+    } finally {
+      _iosCaptureInProgress = false;
+    }
   }
 
   Future<void> _disposeIosCamera() async {
@@ -1846,10 +1911,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    const Text(
-                      'Usa la camara manual de iPhone. Centra toda la INE y toma la foto cuando el texto se vea nitido.',
+                    Text(
+                      _iosHint,
                       textAlign: TextAlign.center,
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontSize: 15,
                         height: 1.4,
                         color: Color(0xFF4B5563),
