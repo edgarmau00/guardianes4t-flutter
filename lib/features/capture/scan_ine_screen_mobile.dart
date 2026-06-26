@@ -13,7 +13,6 @@ import '../../services/ios_native_ine_scanner.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ocr_validation_service.dart';
 import '../../services/web_ocr_parser.dart';
-import 'package:flutter/services.dart';
 
 class ScanIneScreen extends StatefulWidget {
   const ScanIneScreen({super.key});
@@ -25,13 +24,7 @@ class ScanIneScreen extends StatefulWidget {
 class _ScanIneScreenState extends State<ScanIneScreen> {
   static const int _qualityCheckMaxWidth = 960;
   static const Duration _ocrTimeout = Duration(seconds: 28);
-  static const Duration _iosCameraAutoStartDelay = Duration(milliseconds: 520);
-  static const Duration _iosFrameAnalysisGap = Duration(milliseconds: 110);
   static const Duration _iosPreCaptureFocusWait = Duration(milliseconds: 680);
-  static const int _iosRequiredStableFrames = 3;
-  static const double _iosMotionThreshold = 6.8;
-  static const double _iosPreviewEdgeThreshold = 26.0;
-  static const double _iosPreviewContrastThreshold = 22.0;
   static const double _iosBlockingBlurThreshold = 3.0;
   static const double _iosWarningBlurThreshold = 4.8;
   static const double _iosOcrCropWidthFactor = 0.78;
@@ -47,12 +40,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   bool _iosCameraReady = false;
   bool _iosCameraInitializing = false;
   bool _iosCaptureInProgress = false;
-  bool _iosStreaming = false;
   String _iosHint =
-      'Acomoda la INE dentro del recuadro. Manten unos 18 a 26 cm de distancia. La captura sera automatica.';
-  DateTime? _iosLastAnalysisAt;
-  List<int>? _iosPreviousLumaSample;
-  int _iosStableFrames = 0;
+      'Acomoda la INE dentro del recuadro. Manten unos 18 a 26 cm de distancia y toca "Tomar ahora" cuando el texto se vea claro.';
 
   @override
   void initState() {
@@ -105,8 +94,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {});
       }
 
-      await Future<void>.delayed(_iosCameraAutoStartDelay);
-      await _startIosImageStream();
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -131,7 +118,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         _processing = false;
         _processingMessage = 'Procesando datos...';
         _iosHint =
-            'Acomoda la INE dentro del recuadro. Manten unos 18 a 26 cm de distancia. La captura sera automatica.';
+            'Acomoda la INE dentro del recuadro. Manten unos 18 a 26 cm de distancia y toca "Tomar ahora" cuando el texto se vea claro.';
       });
     }
 
@@ -147,7 +134,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   Future<void> _disposeIosCamera() async {
     final controller = _iosCameraController;
     _iosCameraController = null;
-    _iosStreaming = false;
     _iosCameraReady = false;
 
     if (controller == null) return;
@@ -202,148 +188,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     return rearCameras.first;
   }
 
-  Future<void> _startIosImageStream() async {
-    final controller = _iosCameraController;
-    if (!Platform.isIOS || controller == null || !controller.value.isInitialized) {
-      return;
-    }
-    if (_iosStreaming || _iosCaptureInProgress || _processing) return;
-
-    _iosPreviousLumaSample = null;
-    _iosLastAnalysisAt = null;
-    _iosStableFrames = 0;
-
-    try {
-      await controller.startImageStream((CameraImage image) async {
-        if (!_iosStreaming || _iosCaptureInProgress || _processing) return;
-
-        final now = DateTime.now();
-        if (_iosLastAnalysisAt != null &&
-            now.difference(_iosLastAnalysisAt!) < _iosFrameAnalysisGap) {
-          return;
-        }
-        _iosLastAnalysisAt = now;
-
-        final signal = _analyzeIosFrame(image);
-        final previous = _iosPreviousLumaSample;
-        final motion = previous == null
-            ? double.infinity
-            : _calculateMotion(previous, signal.sample);
-
-        _iosPreviousLumaSample = signal.sample;
-
-        final hasEnoughDetail =
-            signal.edgeScore > _iosPreviewEdgeThreshold &&
-            signal.contrast > _iosPreviewContrastThreshold;
-        final brightnessOk = signal.brightness > 45 && signal.brightness < 228;
-        final isStable = motion < _iosMotionThreshold;
-
-        if (hasEnoughDetail && brightnessOk && isStable) {
-          _iosStableFrames += 1;
-        } else {
-          _iosStableFrames = 0;
-        }
-
-        if (!mounted) return;
-
-        if (_iosStableFrames >= _iosRequiredStableFrames) {
-          setState(() {
-            _iosHint = 'Documento listo. Tomando foto...';
-          });
-          await _takeSingleAutoPicture();
-          return;
-        }
-
-        final nextHint = hasEnoughDetail
-            ? 'Manten la INE centrada y quieta. Espera a que el texto se vea nitido antes de capturar.'
-            : 'Centra toda la INE, evita movimiento y ajusta distancia hasta que el texto se vea claro.';
-
-        if (_iosHint != nextHint) {
-          setState(() {
-            _iosHint = nextHint;
-          });
-        }
-      });
-    } catch (_) {
-      _iosStreaming = false;
-      if (!mounted) return;
-      setState(() {
-        _iosHint =
-            'La captura automatica no pudo iniciar. Puedes tomar la foto manualmente.';
-      });
-      return;
-    }
-
-    _iosStreaming = true;
-  }
-
-  _IosFrameSignal _analyzeIosFrame(CameraImage image) {
-    final plane = image.planes.first;
-    final bytes = plane.bytes;
-    final bytesPerRow = plane.bytesPerRow;
-    final width = image.width;
-    final height = image.height;
-
-    final left = (width * 0.18).floor();
-    final right = (width * 0.82).floor();
-    final top = (height * 0.26).floor();
-    final bottom = (height * 0.74).floor();
-
-    final sample = <int>[];
-    double brightnessSum = 0;
-    double edgeSum = 0;
-    int count = 0;
-
-    for (int y = top; y < bottom - 2; y += 14) {
-      for (int x = left; x < right - 2; x += 14) {
-        final index = y * bytesPerRow + x;
-        final center = bytes[index];
-        final rightPixel = bytes[index + 1];
-        final bottomPixel = bytes[index + bytesPerRow];
-
-        brightnessSum += center;
-        edgeSum +=
-            (center - rightPixel).abs() + (center - bottomPixel).abs();
-        sample.add(center);
-        count++;
-      }
-    }
-
-    if (count == 0) {
-      return const _IosFrameSignal(
-        brightness: 0,
-        edgeScore: 0,
-        contrast: 0,
-        sample: <int>[],
-      );
-    }
-
-    final brightness = brightnessSum / count;
-    double varianceSum = 0;
-    for (final value in sample) {
-      varianceSum += math.pow(value - brightness, 2).toDouble();
-    }
-
-    final contrast = math.sqrt(varianceSum / count);
-    return _IosFrameSignal(
-      brightness: brightness,
-      edgeScore: edgeSum / count,
-      contrast: contrast,
-      sample: sample,
-    );
-  }
-
-  double _calculateMotion(List<int> previous, List<int> current) {
-    final length = math.min(previous.length, current.length);
-    if (length == 0) return double.infinity;
-
-    double diff = 0;
-    for (int i = 0; i < length; i++) {
-      diff += (previous[i] - current[i]).abs();
-    }
-    return diff / length;
-  }
-
   Future<void> _configureIosCamera(CameraController controller) async {
     try {
       await controller.setFocusMode(FocusMode.auto);
@@ -368,10 +212,16 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
   Future<void> _prepareIosFocusForCapture(CameraController controller) async {
     await _configureIosCamera(controller);
-    await Future.delayed(const Duration(milliseconds: 180));
-    await _configureIosCamera(controller);
     await Future.delayed(const Duration(milliseconds: 220));
     await _configureIosCamera(controller);
+    await Future.delayed(const Duration(milliseconds: 260));
+    await _configureIosCamera(controller);
+    try {
+      await controller.setFocusMode(FocusMode.locked);
+    } catch (_) {}
+    try {
+      await controller.setExposureMode(ExposureMode.locked);
+    } catch (_) {}
     await Future.delayed(_iosPreCaptureFocusWait);
   }
 
@@ -389,7 +239,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     try {
       if (controller.value.isStreamingImages) {
-        _iosStreaming = false;
         await controller.stopImageStream();
       }
 
@@ -407,10 +256,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {
           _processing = false;
           _iosHint =
-              'No se pudo leer bien. Aleja un poco el telefono, centra toda la INE y mantenla quieta para reintentar.';
+              'No se pudo leer bien. Ajusta la distancia hasta que el texto se vea claro y vuelve a tocar "Tomar ahora".';
         });
         _iosCaptureInProgress = false;
-        await _startIosImageStream();
         return;
       }
     } catch (_) {
@@ -491,7 +339,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         );
       }
 
-      if (avgEdge < _iosBlockingBlurThreshold) {
+      if (avgEdge < (_iosBlockingBlurThreshold - 0.8)) {
         return const _ImageQualityCheck(
           blockingMessage:
               'La imagen salio borrosa. Aleja un poco el telefono, mantén la INE fija y reintenta.',
@@ -523,50 +371,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if ((_processing && !Platform.isIOS) || _openingNativeScanner) return;
 
     if (Platform.isIOS) {
-      _openingNativeScanner = true;
-
-      try {
-        if (mounted) {
-          setState(() {
-            _processing = true;
-            _processingMessage = 'Abriendo escaner inteligente...';
-          });
-        }
-
-        final nativeScan = await IosNativeIneScanner().scanIne();
-        if (nativeScan == null) {
-          if (mounted) {
-            setState(() => _processing = false);
-          }
-          return;
-        }
-
-        final nativeRaw = await WebOcrParser().parse(nativeScan.rawText);
-        nativeRaw.addAll(nativeScan.structuredData);
-        nativeRaw['rawText'] = nativeScan.rawText;
-        nativeRaw['processingMode'] = nativeScan.source;
-
-        final success = await _processImagePath(
-          nativeScan.imagePath,
-          preferredRawResult: nativeRaw,
-        );
-
-        if (!success && mounted) {
-          await _activateIosManualFallback(
-            'La lectura nativa no quedo suficientemente clara. Cambiamos a captura automatica.',
-          );
-        }
-      } on PlatformException catch (_) {
-        await _activateIosManualFallback(
-          'El escaner nativo no estuvo disponible. Usaremos la camara automatica.',
-        );
-      } catch (_) {
-        await _activateIosManualFallback(
-          'El escaner nativo fallo. Usaremos la camara automatica.',
-        );
-      } finally {
-        _openingNativeScanner = false;
-      }
+      await _activateIosManualFallback();
       return;
     }
 
@@ -587,12 +392,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       await _processImagePath(result.first);
     } on DocumentScannerException {
-      if (Platform.isIOS) {
-        await _activateIosManualFallback(
-          'No se pudo abrir el escaner inteligente. Cambiamos a captura automatica.',
-        );
-        return;
-      }
       if (!mounted) return;
       setState(() => _processing = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -601,12 +400,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         ),
       );
     } catch (_) {
-      if (Platform.isIOS) {
-        await _activateIosManualFallback(
-          'El escaner inteligente no estuvo disponible. Usaremos la camara automatica.',
-        );
-        return;
-      }
       if (!mounted) return;
       setState(() => _processing = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -627,7 +420,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         final nativeStill = await IosNativeIneScanner().processCapturedImage(
           imagePath,
         );
-        if (nativeStill != null && nativeStill.rawText.trim().isNotEmpty) {
+        if (nativeStill != null &&
+            (nativeStill.rawText.trim().isNotEmpty ||
+                nativeStill.structuredData.isNotEmpty)) {
           final nativeRaw = await WebOcrParser().parse(nativeStill.rawText);
           nativeRaw.addAll(nativeStill.structuredData);
           nativeRaw['rawText'] = nativeStill.rawText;
@@ -859,6 +654,25 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       // Si el refinado falla, conservamos el mejor resultado previo.
     }
 
+    try {
+      final regionRecovered = await _recoverIosFieldsFromRegions(
+        ocr,
+        enhancedPath,
+        bestResult.rawResult,
+      );
+      final regionValidation = OcrValidationService().validate(regionRecovered);
+
+      if (_iosValidationScore(regionValidation) >=
+          _iosValidationScore(bestResult.validation)) {
+        bestResult = _IosOcrResult(
+          rawResult: regionRecovered,
+          validation: regionValidation,
+        );
+      }
+    } catch (_) {
+      // Si la lectura por zonas falla, mantenemos el mejor resultado vigente.
+    }
+
     return bestResult;
   }
 
@@ -988,26 +802,32 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       return;
     }
 
-    final upperText = rawText.toUpperCase().replaceAll('\r', '');
+    final upperText = _normalizeIosOcrText(rawText);
     final nombreBlock = RegExp(
       r'NOMBRE\s+([A-ZÑ.\s]+?)\s+DOMICILIO',
       dotAll: true,
     ).firstMatch(upperText);
 
-    final extracted = (nombreBlock?.group(1) ?? data['nombre'] ?? '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    final extracted = (nombreBlock?.group(1) ?? data['nombre'] ?? '').trim();
+    final cleanedExtracted = _cleanIosPersonText(extracted);
 
-    if (extracted.isEmpty) return;
+    if (cleanedExtracted.isEmpty) return;
 
-    final tokens = extracted
+    final tokens = cleanedExtracted
         .split(RegExp(r'\s+'))
         .map((token) => token.trim())
-        .where((token) => token.isNotEmpty)
+        .where(
+          (token) =>
+              token.isNotEmpty &&
+              token.length > 1 &&
+              !RegExp(r'^\d+$').hasMatch(token),
+        )
         .toList();
 
     if (tokens.length < 3) {
-      data['nombre'] = extracted;
+      if (currentNombre.isEmpty) {
+        data['nombre'] = cleanedExtracted;
+      }
       return;
     }
 
@@ -1020,6 +840,24 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (currentNombre.isEmpty) {
       data['nombre'] = tokens.sublist(2).join(' ');
     }
+
+    final rebuilt = [
+      data['apellidoPaterno'] ?? '',
+      data['apellidoMaterno'] ?? '',
+      data['nombre'] ?? '',
+    ].where((value) => value.trim().isNotEmpty).join(' ').trim();
+
+    if (rebuilt.isNotEmpty) {
+      final rebuiltTokens = _cleanIosPersonText(rebuilt)
+          .split(RegExp(r'\s+'))
+          .where((token) => token.trim().isNotEmpty)
+          .toList();
+      if (rebuiltTokens.length >= 3) {
+        data['apellidoPaterno'] = rebuiltTokens[0];
+        data['apellidoMaterno'] = rebuiltTokens[1];
+        data['nombre'] = rebuiltTokens.sublist(2).join(' ');
+      }
+    }
   }
 
   void _repairIosAddressFields(Map<String, String> data, String rawText) {
@@ -1028,20 +866,20 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final currentEstado = (data['estado'] ?? '').trim();
     final currentPostalCode = (data['codigoPostal'] ?? '').trim();
 
-    final upperText = rawText.toUpperCase().replaceAll('\r', '');
+    final upperText = _normalizeIosOcrText(rawText);
     final domicilioMatch = RegExp(
       r'DOMICILIO\s+(.+?)\s+CLAVE\s+DE\s+ELECTOR',
       dotAll: true,
     ).firstMatch(upperText);
 
     if (currentAddress.isEmpty && domicilioMatch != null) {
-      data['direccion'] = domicilioMatch.group(1)!
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim();
+      data['direccion'] = _cleanIosAddressText(domicilioMatch.group(1)!);
     }
 
-    final addressSource = (data['direccion'] ?? '').trim();
+    final addressSource = _cleanIosAddressText((data['direccion'] ?? '').trim());
     if (addressSource.isEmpty) return;
+
+    data['direccion'] = addressSource;
 
     final postalMatch = RegExp(r'\b(\d{5})\b').firstMatch(addressSource);
     if (currentPostalCode.isEmpty && postalMatch != null) {
@@ -1054,10 +892,12 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     if (municipalityStateMatch != null) {
       if (currentMunicipio.isEmpty) {
-        data['municipio'] = municipalityStateMatch.group(1)!.trim();
+        data['municipio'] =
+            _cleanIosAddressToken(municipalityStateMatch.group(1)!);
       }
       if (currentEstado.isEmpty) {
-        data['estado'] = municipalityStateMatch.group(2)!.trim();
+        data['estado'] =
+            _cleanIosAddressToken(municipalityStateMatch.group(2)!);
       }
       if (currentPostalCode.isEmpty && municipalityStateMatch.group(3) != null) {
         data['codigoPostal'] = municipalityStateMatch.group(3)!.trim();
@@ -1066,7 +906,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   }
 
   void _repairIosIdentityFields(Map<String, String> data, String rawText) {
-    final upperText = rawText.toUpperCase().replaceAll('\r', ' ');
+    final upperText = _normalizeIosOcrText(rawText);
 
     void fillIfEmpty(String key, RegExp pattern) {
       final current = (data[key] ?? '').trim();
@@ -1105,6 +945,42 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       RegExp(r'SEXO\s+([HM])'),
     );
 
+    final normalizedClave =
+        _normalizeIosClaveElectoral(data['claveElectoral'] ?? '', upperText);
+    if (normalizedClave.isNotEmpty) {
+      data['claveElectoral'] = normalizedClave;
+    }
+
+    final normalizedCurp = _normalizeIosCurp(data['curp'] ?? '', upperText);
+    if (normalizedCurp.isNotEmpty) {
+      data['curp'] = normalizedCurp;
+    }
+
+    final normalizedBirthDate = _normalizeIosBirthDate(
+      data['fechaNacimiento'] ?? '',
+      upperText,
+    );
+    if (normalizedBirthDate.isNotEmpty) {
+      data['fechaNacimiento'] = normalizedBirthDate;
+    }
+
+    final normalizedSection =
+        _normalizeIosSection(data['seccionElectoral'] ?? '', upperText);
+    if (normalizedSection.isNotEmpty) {
+      data['seccionElectoral'] = normalizedSection;
+    }
+
+    final normalizedValidity =
+        _normalizeIosValidity(data['vigencia'] ?? '', upperText);
+    if (normalizedValidity.isNotEmpty) {
+      data['vigencia'] = normalizedValidity;
+    }
+
+    final normalizedSexo = _normalizeIosSexo(data['sexo'] ?? '', upperText);
+    if (normalizedSexo.isNotEmpty) {
+      data['sexo'] = normalizedSexo;
+    }
+
     if ((data['claveElector'] ?? '').trim().isEmpty &&
         (data['claveElectoral'] ?? '').trim().isNotEmpty) {
       data['claveElector'] = data['claveElectoral']!;
@@ -1113,6 +989,154 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         (data['seccionElectoral'] ?? '').trim().isNotEmpty) {
       data['seccion'] = data['seccionElectoral']!;
     }
+  }
+
+  String _normalizeIosOcrText(String value) {
+    return value
+        .toUpperCase()
+        .replaceAll('\r', ' ')
+        .replaceAll('Ã‘', 'Ñ')
+        .replaceAll('Ã“', 'Ó')
+        .replaceAll('Ã‰', 'É')
+        .replaceAll('Ã', 'Á')
+        .replaceAll('Ãš', 'Ú')
+        .replaceAll('Ã', 'Í')
+        .replaceAll('|', 'I')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _cleanIosPersonText(String value) {
+    return _normalizeIosOcrText(value)
+        .replaceAll(RegExp(r'[^A-ZÑ\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _cleanIosAddressToken(String value) {
+    return _normalizeIosOcrText(value)
+        .replaceAll(RegExp(r'[^A-ZÑ\s.]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _cleanIosAddressText(String value) {
+    return _normalizeIosOcrText(value)
+        .replaceAll(RegExp(r'\bDOMICILIO\b'), ' ')
+        .replaceAll(RegExp(r'\bCLAVE\s+DE\s+ELECTOR\b.*$'), ' ')
+        .replaceAll(RegExp(r'[^A-Z0-9Ñ\s,./-]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _normalizeIosClaveElectoral(String current, String rawText) {
+    final currentCompact =
+        _normalizeIosOcrText(current).replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (currentCompact.length >= 18) {
+      return currentCompact.substring(0, 18);
+    }
+
+    final rawCandidates = RegExp(r'[A-Z0-9]{18,20}')
+        .allMatches(rawText)
+        .map((match) => match.group(0) ?? '')
+        .map((value) => value.replaceAll(RegExp(r'[^A-Z0-9]'), ''))
+        .where((value) => value.length >= 18)
+        .toList();
+
+    if (rawCandidates.isEmpty) return currentCompact;
+    rawCandidates.sort((a, b) => b.length.compareTo(a.length));
+    return rawCandidates.first.substring(0, 18);
+  }
+
+  String _normalizeIosCurp(String current, String rawText) {
+    final currentCompact =
+        _normalizeIosOcrText(current).replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final currentMatch = RegExp(
+      r'[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9]{2}',
+    ).firstMatch(currentCompact);
+    if (currentMatch != null) {
+      return currentMatch.group(0) ?? currentCompact;
+    }
+
+    final rawMatch = RegExp(
+      r'[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9]{2}',
+    ).firstMatch(rawText.replaceAll(RegExp(r'[^A-Z0-9]'), ''));
+    return rawMatch?.group(0) ?? currentCompact;
+  }
+
+  String _normalizeIosBirthDate(String current, String rawText) {
+    final currentMatch = RegExp(r'(\d{2})/(\d{2})/(\d{4})').firstMatch(current);
+    if (currentMatch != null) {
+      return '${currentMatch.group(1)}/${currentMatch.group(2)}/${currentMatch.group(3)}';
+    }
+
+    final compact = rawText.replaceAll(RegExp(r'[^0-9/]'), ' ');
+    final rawMatch = RegExp(r'(\d{2})/(\d{2})/(\d{4})').firstMatch(compact);
+    if (rawMatch != null) {
+      return '${rawMatch.group(1)}/${rawMatch.group(2)}/${rawMatch.group(3)}';
+    }
+
+    final digits = rawText.replaceAll(RegExp(r'[^0-9]'), '');
+    final eightMatch = RegExp(r'(\d{2})(\d{2})(\d{4})').firstMatch(digits);
+    if (eightMatch != null) {
+      return '${eightMatch.group(1)}/${eightMatch.group(2)}/${eightMatch.group(3)}';
+    }
+    return current.trim();
+  }
+
+  String _normalizeIosSection(String current, String rawText) {
+    final currentDigits = current.replaceAll(RegExp(r'[^0-9]'), '');
+    if (currentDigits.length >= 4) {
+      return currentDigits.substring(0, 4);
+    }
+
+    final sectionMatch = RegExp(r'SECCI[OÓ]N\s*([0-9]{3,4})').firstMatch(rawText);
+    if (sectionMatch != null) {
+      return sectionMatch.group(1) ?? currentDigits;
+    }
+
+    final candidates = RegExp(r'\b[0-9]{4}\b')
+        .allMatches(rawText)
+        .map((match) => match.group(0) ?? '')
+        .toList();
+    if (candidates.isNotEmpty) {
+      return candidates.first;
+    }
+    return currentDigits;
+  }
+
+  String _normalizeIosValidity(String current, String rawText) {
+    final currentMatch =
+        RegExp(r'((?:19|20)\d{2})\s*-\s*((?:19|20)\d{2})').firstMatch(current);
+    if (currentMatch != null) {
+      return '${currentMatch.group(1)}-${currentMatch.group(2)}';
+    }
+
+    final rawMatch =
+        RegExp(r'((?:19|20)\d{2})\s*-\s*((?:19|20)\d{2})').firstMatch(rawText);
+    if (rawMatch != null) {
+      return '${rawMatch.group(1)}-${rawMatch.group(2)}';
+    }
+
+    final years = RegExp(r'(?:19|20)\d{2}')
+        .allMatches(rawText)
+        .map((match) => match.group(0) ?? '')
+        .toList();
+    if (years.length >= 2) {
+      return '${years[0]}-${years[1]}';
+    }
+    return current.trim();
+  }
+
+  String _normalizeIosSexo(String current, String rawText) {
+    final currentUpper = _normalizeIosOcrText(current);
+    if (currentUpper == 'H' || currentUpper == 'M') {
+      return currentUpper;
+    }
+
+    final match = RegExp(r'\bSEXO\s*([HM])\b').firstMatch(rawText) ??
+        RegExp(r'\b([HM])\b').firstMatch(rawText);
+    return match?.group(1) ?? currentUpper;
   }
 
   Future<String?> _createIosEnhancedImage(String imagePath) async {
@@ -1160,6 +1184,410 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       return refinedPath;
     } catch (_) {
       return null;
+    }
+  }
+
+  Future<Map<String, String>> _recoverIosFieldsFromRegions(
+    OcrService ocr,
+    String imagePath,
+    Map<String, String> baseRaw,
+  ) async {
+    if (!Platform.isIOS) return baseRaw;
+
+    final bytes = await File(imagePath).readAsBytes();
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return baseRaw;
+
+    var working = img.bakeOrientation(decoded);
+    if (working.width < 3200) {
+      working = img.copyResize(working, width: 3200);
+    } else if (working.width > 3600) {
+      working = img.copyResize(working, width: 3600);
+    }
+
+    final merged = Map<String, String>.from(baseRaw);
+    final collectedRawTexts = <String>[
+      if ((baseRaw['rawText'] ?? '').trim().isNotEmpty) baseRaw['rawText']!.trim(),
+    ];
+    final tempDir = await getTemporaryDirectory();
+
+    final regionVariants =
+        <String, List<({String id, double x, double y, double w, double h})>>{
+      'nombreBloque': [
+        (id: 'name_main', x: 0.29, y: 0.16, w: 0.39, h: 0.24),
+        (id: 'name_tight', x: 0.31, y: 0.17, w: 0.35, h: 0.21),
+        (id: 'name_wide', x: 0.28, y: 0.15, w: 0.43, h: 0.25),
+      ],
+      'direccion': [
+        (id: 'address_main', x: 0.29, y: 0.36, w: 0.47, h: 0.20),
+        (id: 'address_tight', x: 0.30, y: 0.38, w: 0.44, h: 0.17),
+        (id: 'address_wide', x: 0.27, y: 0.35, w: 0.51, h: 0.21),
+      ],
+      'claveElectoral': [
+        (id: 'clave_main', x: 0.29, y: 0.52, w: 0.58, h: 0.09),
+        (id: 'clave_tight', x: 0.33, y: 0.53, w: 0.52, h: 0.08),
+        (id: 'clave_right', x: 0.43, y: 0.52, w: 0.43, h: 0.09),
+      ],
+      'curp': [
+        (id: 'curp_main', x: 0.29, y: 0.59, w: 0.49, h: 0.09),
+        (id: 'curp_tight', x: 0.31, y: 0.60, w: 0.45, h: 0.08),
+        (id: 'curp_wide', x: 0.27, y: 0.58, w: 0.54, h: 0.10),
+      ],
+      'fechaNacimiento': [
+        (id: 'birth_main', x: 0.29, y: 0.69, w: 0.29, h: 0.10),
+        (id: 'birth_tight', x: 0.31, y: 0.70, w: 0.24, h: 0.08),
+      ],
+      'seccionElectoral': [
+        (id: 'section_main', x: 0.56, y: 0.68, w: 0.14, h: 0.10),
+        (id: 'section_tight', x: 0.57, y: 0.70, w: 0.12, h: 0.08),
+      ],
+      'vigencia': [
+        (id: 'vigencia_main', x: 0.66, y: 0.67, w: 0.20, h: 0.11),
+        (id: 'vigencia_tight', x: 0.68, y: 0.69, w: 0.17, h: 0.09),
+      ],
+      'sexo': [
+        (id: 'sexo_main', x: 0.76, y: 0.15, w: 0.15, h: 0.09),
+        (id: 'sexo_tight', x: 0.79, y: 0.16, w: 0.10, h: 0.07),
+      ],
+      'metaDerecha': [
+        (id: 'meta_right_main', x: 0.55, y: 0.50, w: 0.33, h: 0.30),
+        (id: 'meta_right_tight', x: 0.59, y: 0.54, w: 0.25, h: 0.24),
+      ],
+    };
+
+    for (final entry in regionVariants.entries) {
+      final regionKey = entry.key;
+      Map<String, String>? bestRegionRaw;
+      String bestRegionText = '';
+      double bestScore = double.negativeInfinity;
+
+      for (int i = 0; i < entry.value.length; i++) {
+        final region = entry.value[i];
+        final crop = _cropIosNormalizedRegion(
+          working,
+          x: region.x,
+          y: region.y,
+          widthFactor: region.w,
+          heightFactor: region.h,
+        );
+        if (crop == null) continue;
+
+        final enhanced = _enhanceIosTextRegion(crop, regionKey);
+        final cropPath = p.join(
+          tempDir.path,
+          'ios_region_${region.id}_${DateTime.now().microsecondsSinceEpoch}_$i.jpg',
+        );
+        await File(cropPath).writeAsBytes(img.encodeJpg(enhanced, quality: 98));
+
+        try {
+          final regionRaw = await ocr.scanIne(cropPath);
+          final regionText = (regionRaw['rawText'] ?? '').trim();
+          if (regionText.isEmpty && regionRaw.isEmpty) continue;
+
+          final score = _scoreIosRegionCandidate(regionKey, regionRaw, regionText);
+          if (score > bestScore) {
+            bestScore = score;
+            bestRegionRaw = regionRaw;
+            bestRegionText = regionText;
+          }
+        } catch (_) {
+          // Una zona fallida no debe romper el resto del rescate.
+        }
+      }
+
+      if (bestRegionRaw == null) continue;
+      if (bestRegionText.isNotEmpty) {
+        collectedRawTexts.add(bestRegionText);
+      }
+
+      _mergeIosRegionResult(merged, regionKey, bestRegionRaw, bestRegionText);
+      if (regionKey == 'metaDerecha') {
+        _mergeIosRegionResult(
+          merged,
+          'fechaNacimiento',
+          bestRegionRaw,
+          bestRegionText,
+        );
+        _mergeIosRegionResult(
+          merged,
+          'seccionElectoral',
+          bestRegionRaw,
+          bestRegionText,
+        );
+        _mergeIosRegionResult(merged, 'vigencia', bestRegionRaw, bestRegionText);
+        _mergeIosRegionResult(merged, 'sexo', bestRegionRaw, bestRegionText);
+      }
+    }
+
+    final mergedRawText = collectedRawTexts
+        .where((value) => value.trim().isNotEmpty)
+        .join('\n');
+    if (mergedRawText.trim().isNotEmpty) {
+      merged['rawText'] = mergedRawText.trim();
+    }
+    merged['processingMode'] =
+        merged['processingMode'] ?? 'ios_manual_region_mix';
+
+    _repairIosNameFields(merged, merged['rawText'] ?? '');
+    _repairIosAddressFields(merged, merged['rawText'] ?? '');
+    _repairIosIdentityFields(merged, merged['rawText'] ?? '');
+
+    return merged;
+  }
+
+  double _scoreIosRegionCandidate(
+    String regionKey,
+    Map<String, String> regionRaw,
+    String regionText,
+  ) {
+    final upperText = regionText.toUpperCase().replaceAll('\r', ' ').trim();
+    final compactText = upperText.replaceAll(RegExp(r'\s+'), ' ');
+
+    double base = compactText.length * 0.02;
+
+    bool has(RegExp pattern) => pattern.hasMatch(compactText);
+
+    switch (regionKey) {
+      case 'nombreBloque':
+        final nonNoiseLines = regionText
+            .split(RegExp(r'[\r\n]+'))
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)
+            .where((line) => !line.toUpperCase().contains('NOMBRE'))
+            .where((line) => !line.toUpperCase().contains('SEXO'))
+            .toList();
+        base += nonNoiseLines.length * 2.5;
+        if (nonNoiseLines.length >= 3) base += 10;
+        break;
+      case 'direccion':
+        if (compactText.contains('DOMICILIO')) base += 4;
+        if (compactText.contains('MEX')) base += 2;
+        if (compactText.length >= 32) base += 10;
+        if (RegExp(r'\d{3,5}').hasMatch(compactText)) base += 3;
+        break;
+      case 'claveElectoral':
+        if (has(RegExp(r'[A-Z0-9]{18}'))) base += 20;
+        if (has(RegExp(r'CLAVE\s+DE\s+ELECTOR'))) base += 5;
+        break;
+      case 'curp':
+        if (has(RegExp(r'[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9]{2}'))) {
+          base += 22;
+        }
+        if (compactText.contains('CURP')) base += 5;
+        break;
+      case 'fechaNacimiento':
+        if (has(RegExp(r'\d{2}/\d{2}/\d{4}'))) base += 16;
+        if (compactText.contains('FECHA')) base += 4;
+        break;
+      case 'seccionElectoral':
+        if (has(RegExp(r'\b\d{4}\b'))) base += 12;
+        if (compactText.contains('SECCI')) base += 4;
+        break;
+      case 'vigencia':
+        if (has(RegExp(r'\b(19|20)\d{2}\s*-\s*(19|20)\d{2}\b'))) base += 18;
+        if (compactText.contains('VIGENCIA')) base += 4;
+        break;
+      case 'sexo':
+        if (has(RegExp(r'\bSEXO\s*[HM]\b')) || has(RegExp(r'\b[HM]\b'))) {
+          base += 14;
+        }
+        break;
+      case 'metaDerecha':
+        if (has(RegExp(r'\b(19|20)\d{2}\s*-\s*(19|20)\d{2}\b'))) base += 12;
+        if (has(RegExp(r'\b\d{2}/\d{2}/\d{4}\b'))) base += 8;
+        if (has(RegExp(r'\b\d{4}\b'))) base += 6;
+        if (has(RegExp(r'\bSEXO\s*[HM]\b')) || has(RegExp(r'\b[HM]\b'))) {
+          base += 5;
+        }
+        break;
+    }
+
+    for (final entry in regionRaw.entries) {
+      if (entry.value.trim().isNotEmpty) {
+        base += 0.8;
+      }
+    }
+
+    return base;
+  }
+
+  img.Image? _cropIosNormalizedRegion(
+    img.Image source, {
+    required double x,
+    required double y,
+    required double widthFactor,
+    required double heightFactor,
+  }) {
+    final left = (source.width * x).round().clamp(0, source.width - 1);
+    final top = (source.height * y).round().clamp(0, source.height - 1);
+    final width = (source.width * widthFactor).round();
+    final height = (source.height * heightFactor).round();
+    final safeWidth = math.min(width, source.width - left);
+    final safeHeight = math.min(height, source.height - top);
+
+    if (safeWidth < 220 || safeHeight < 90) return null;
+
+    return img.copyCrop(
+      source,
+      x: left,
+      y: top,
+      width: safeWidth,
+      height: safeHeight,
+    );
+  }
+
+  img.Image _enhanceIosTextRegion(img.Image source, String regionKey) {
+    var working = source.width < 2400
+        ? img.copyResize(source, width: 2400)
+        : source.width > 2800
+            ? img.copyResize(source, width: 2800)
+            : source;
+
+    final highDensityRegion = <String>{
+      'claveElectoral',
+      'curp',
+      'fechaNacimiento',
+      'seccionElectoral',
+      'vigencia',
+      'sexo',
+    }.contains(regionKey);
+
+    working = img.adjustColor(
+      working,
+      contrast: highDensityRegion ? 1.62 : 1.44,
+      brightness: highDensityRegion ? -0.01 : 0.01,
+      gamma: highDensityRegion ? 0.86 : 0.90,
+      saturation: 1.0,
+    );
+    working = img.convolution(
+      working,
+      filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+    );
+
+    final gray = img.grayscale(img.Image.from(working));
+    return img.adjustColor(
+      gray,
+      contrast: highDensityRegion ? 1.78 : 1.56,
+      brightness: 0.0,
+      gamma: highDensityRegion ? 0.82 : 0.87,
+    );
+  }
+
+  void _mergeIosRegionResult(
+    Map<String, String> merged,
+    String regionKey,
+    Map<String, String> regionRaw,
+    String regionText,
+  ) {
+    final upperText = regionText.toUpperCase().replaceAll('\r', ' ');
+
+    String? extract(RegExp pattern) {
+      final match = pattern.firstMatch(upperText);
+      final value = match?.group(1)?.trim() ?? '';
+      return value.isEmpty ? null : value;
+    }
+
+    switch (regionKey) {
+      case 'nombreBloque':
+        final cleanedLines = regionText
+            .split(RegExp(r'[\r\n]+'))
+            .map((line) => line.trim().toUpperCase())
+            .where((line) => line.isNotEmpty)
+            .where((line) => !line.contains('NOMBRE'))
+            .where((line) => !line.contains('SEXO'))
+            .toList();
+        if (cleanedLines.isNotEmpty) {
+          if ((merged['apellidoPaterno'] ?? '').trim().isEmpty &&
+              cleanedLines.isNotEmpty) {
+            merged['apellidoPaterno'] = cleanedLines[0];
+          }
+          if ((merged['apellidoMaterno'] ?? '').trim().isEmpty &&
+              cleanedLines.length > 1) {
+            merged['apellidoMaterno'] = cleanedLines[1];
+          }
+          if ((merged['nombre'] ?? '').trim().isEmpty && cleanedLines.length > 2) {
+            merged['nombre'] = cleanedLines.sublist(2).join(' ');
+          }
+        }
+        break;
+      case 'direccion':
+        final address = regionText
+            .replaceAll(RegExp(r'DOMICILIO', caseSensitive: false), '')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+        if ((merged['direccion'] ?? '').trim().length < address.length &&
+            address.length >= 18) {
+          merged['direccion'] = address;
+        }
+        break;
+      case 'claveElectoral':
+        final clave = extract(RegExp(r'([A-Z0-9]{16,20})'));
+        if (clave != null && clave.length >= 16) {
+          merged['claveElectoral'] = clave;
+          merged['claveElector'] = clave;
+        }
+        break;
+      case 'curp':
+        final curp = extract(RegExp(r'([A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9]{2})'));
+        if (curp != null && curp.length >= 18) {
+          merged['curp'] = curp;
+        }
+        break;
+      case 'fechaNacimiento':
+        final birthDate = extract(RegExp(r'(\d{2}/\d{2}/\d{4})'));
+        if (birthDate != null) {
+          merged['fechaNacimiento'] = birthDate;
+        }
+        break;
+      case 'seccionElectoral':
+        final section = extract(RegExp(r'([0-9]{3,4})'));
+        if (section != null) {
+          merged['seccionElectoral'] = section;
+          merged['seccion'] = section;
+        }
+        break;
+      case 'vigencia':
+        final vigencia = extract(RegExp(r'([0-9]{4}\s*-\s*[0-9]{4})'));
+        if (vigencia != null) {
+          merged['vigencia'] = vigencia;
+        }
+        break;
+      case 'sexo':
+        final sexo = extract(RegExp(r'\b([HM])\b'));
+        if (sexo != null) {
+          merged['sexo'] = sexo;
+        }
+        break;
+      case 'metaDerecha':
+        final sexo = extract(RegExp(r'SEXO\s*([HM])')) ??
+            extract(RegExp(r'\b([HM])\b'));
+        final birthDate = extract(RegExp(r'(\d{2}/\d{2}/\d{4})'));
+        final section = extract(RegExp(r'SECCI[OÓ]N\s*([0-9]{3,4})')) ??
+            extract(RegExp(r'\b([0-9]{4})\b'));
+        final vigencia = extract(RegExp(r'([0-9]{4}\s*-\s*[0-9]{4})'));
+        if (sexo != null) {
+          merged['sexo'] = sexo;
+        }
+        if (birthDate != null) {
+          merged['fechaNacimiento'] = birthDate;
+        }
+        if (section != null) {
+          merged['seccionElectoral'] = section;
+          merged['seccion'] = section;
+        }
+        if (vigencia != null) {
+          merged['vigencia'] = vigencia;
+        }
+        break;
+    }
+
+    for (final entry in regionRaw.entries) {
+      final current = (merged[entry.key] ?? '').trim();
+      final value = entry.value.trim();
+      if (value.isEmpty) continue;
+      if (current.isEmpty || value.length > current.length) {
+        merged[entry.key] = value;
+      }
     }
   }
 
@@ -1406,7 +1834,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                     ),
                     const SizedBox(height: 10),
                     const Text(
-                      'Elige como quieres iniciar. No abriremos la camara ni el escaner hasta que toques un boton.',
+                      'Usa la camara manual de iPhone. Centra toda la INE y toma la foto cuando el texto se vea nitido.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 15,
@@ -1423,15 +1851,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                             : () => _activateIosManualFallback(),
                         icon: const Icon(Icons.camera_alt_outlined),
                         label: const Text('Abrir camara'),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _processing ? null : _scanWithDocumentScanner,
-                        icon: const Icon(Icons.document_scanner_outlined),
-                        label: const Text('Usar escaner inteligente'),
                       ),
                     ),
                   ],
@@ -1519,7 +1938,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text(
-                  'Captura automatica activada',
+                  'Captura manual optimizada',
                   style: TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -1537,9 +1956,21 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
                 OutlinedButton.icon(
                   onPressed: _processing || _iosCaptureInProgress
                       ? null
-                      : _scanWithDocumentScanner,
-                  icon: const Icon(Icons.document_scanner_outlined),
-                  label: const Text('Usar escaner inteligente'),
+                      : () async {
+                          final controller = _iosCameraController;
+                          if (controller == null ||
+                              !controller.value.isInitialized) {
+                            return;
+                          }
+                          await _configureIosCamera(controller);
+                          if (!mounted) return;
+                          setState(() {
+                            _iosHint =
+                                'Camara lista. Centra la INE completa y toca "Tomar ahora" cuando el texto se vea claro.';
+                          });
+                        },
+                  icon: const Icon(Icons.center_focus_strong_outlined),
+                  label: const Text('Reenfocar camara'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
                     side: const BorderSide(color: Colors.white70),
@@ -1613,20 +2044,6 @@ class _ImageQualityCheck {
   const _ImageQualityCheck({
     this.blockingMessage,
     this.warningMessage,
-  });
-}
-
-class _IosFrameSignal {
-  final double brightness;
-  final double edgeScore;
-  final double contrast;
-  final List<int> sample;
-
-  const _IosFrameSignal({
-    required this.brightness,
-    required this.edgeScore,
-    required this.contrast,
-    required this.sample,
   });
 }
 
