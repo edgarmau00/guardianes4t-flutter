@@ -6,11 +6,13 @@ class IosNativeIneScanResult {
   final String imagePath;
   final String rawText;
   final String source;
+  final Map<String, String> structuredData;
 
   const IosNativeIneScanResult({
     required this.imagePath,
     required this.rawText,
     required this.source,
+    this.structuredData = const {},
   });
 }
 
@@ -28,6 +30,7 @@ class IosNativeIneScanner {
     final imagePath = (raw['imagePath'] ?? '').toString();
     final rawText = (raw['rawText'] ?? '').toString();
     final source = (raw['source'] ?? 'ios_visionkit_native').toString();
+    final structuredData = _parseStructuredData(raw['structuredData']);
 
     if (imagePath.isEmpty) return null;
 
@@ -35,6 +38,7 @@ class IosNativeIneScanner {
       imagePath: imagePath,
       rawText: rawText,
       source: source,
+      structuredData: structuredData,
     );
   }
 
@@ -49,6 +53,7 @@ class IosNativeIneScanner {
     final processedImagePath = (raw['imagePath'] ?? imagePath).toString();
     final rawText = (raw['rawText'] ?? '').toString();
     final source = (raw['source'] ?? 'ios_vision_still_image').toString();
+    final structuredData = _parseStructuredData(raw['structuredData']);
 
     if (processedImagePath.isEmpty) return null;
 
@@ -56,6 +61,19 @@ class IosNativeIneScanner {
       imagePath: processedImagePath,
       rawText: rawText,
       source: source,
+      structuredData: structuredData,
     );
+  }
+
+  Map<String, String> _parseStructuredData(dynamic raw) {
+    if (raw is! Map) return const {};
+
+    final result = <String, String>{};
+    for (final entry in raw.entries) {
+      final key = entry.key?.toString().trim() ?? '';
+      if (key.isEmpty) continue;
+      result[key] = (entry.value ?? '').toString().trim();
+    }
+    return result;
   }
 }
