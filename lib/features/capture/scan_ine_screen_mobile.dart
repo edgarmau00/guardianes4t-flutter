@@ -524,6 +524,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       _processing = true;
       _processingMessage = 'Validando calidad de imagen...';
     });
+    await Future<void>.delayed(const Duration(milliseconds: 16));
 
     final qualityCheck = await _validateImageQuality(imagePath);
     if (qualityCheck.blockingMessage != null) {
@@ -558,6 +559,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     setState(() {
       _processingMessage = 'Corrigiendo imagen y leyendo datos...';
     });
+    await Future<void>.delayed(const Duration(milliseconds: 16));
 
     final ocr = OcrService();
     final validator = OcrValidationService();
@@ -776,7 +778,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final fechaNacimiento = (normalized['fechaNacimiento'] ?? '').trim();
     final seccionElectoral = (normalized['seccionElectoral'] ?? '').trim();
 
-    if (validation.globalConfidence < 0.94) return true;
+    if (validation.globalConfidence < 0.91) return true;
     if (clave.length < 18 || curp.length < 18) return true;
     if (direccion.length < 24) return true;
     if (nombre.length < 3) return true;
@@ -784,11 +786,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (apellidoMaterno.length < 3) return true;
     if (fechaNacimiento.length < 8) return true;
     if (seccionElectoral.length < 3) return true;
-    if ((validation.confidence['claveElectoral'] ?? 0) < 0.96) return true;
-    if ((validation.confidence['curp'] ?? 0) < 0.96) return true;
-    if ((validation.confidence['direccion'] ?? 0) < 0.86) return true;
-    if ((validation.confidence['fechaNacimiento'] ?? 0) < 0.90) return true;
-    if ((validation.confidence['seccionElectoral'] ?? 0) < 0.88) return true;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.93) return true;
+    if ((validation.confidence['curp'] ?? 0) < 0.93) return true;
+    if ((validation.confidence['direccion'] ?? 0) < 0.80) return true;
+    if ((validation.confidence['fechaNacimiento'] ?? 0) < 0.86) return true;
+    if ((validation.confidence['seccionElectoral'] ?? 0) < 0.84) return true;
     return false;
   }
 
@@ -806,8 +808,8 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
     if (direccion.length < 20) return true;
     if (clave.length < 18 || curp.length < 18) return true;
-    if ((validation.confidence['nombre'] ?? 0) < 0.72) return true;
-    if ((validation.confidence['direccion'] ?? 0) < 0.72) return true;
+    if ((validation.confidence['nombre'] ?? 0) < 0.68) return true;
+    if ((validation.confidence['direccion'] ?? 0) < 0.68) return true;
     if ((validation.confidence['claveElectoral'] ?? 0) < 0.92) return true;
     if ((validation.confidence['curp'] ?? 0) < 0.92) return true;
     return false;
@@ -905,6 +907,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final currentNombre = (data['nombre'] ?? '').trim();
     final currentPaterno = (data['apellidoPaterno'] ?? '').trim();
     final currentMaterno = (data['apellidoMaterno'] ?? '').trim();
+    final currentDireccion = (data['direccion'] ?? '').trim();
 
     if (currentNombre.isNotEmpty &&
         currentPaterno.isNotEmpty &&
@@ -928,6 +931,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         .map(_stripIosNameNoise)
         .where((line) => line.isNotEmpty)
         .where((line) => !_isIosNoiseLine(line))
+        .where(
+          (line) =>
+              !RegExp(r'\d{3,5}').hasMatch(line) &&
+              !_isIosAddressLikeNameToken(line.split(' ').first.trim()),
+        )
         .toList();
 
     if (blockLines.length >= 3) {
@@ -943,21 +951,23 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       return;
     }
 
-    final tokens = cleanedExtracted
+    final tokens = _sanitizeIosNameTokens(
+      cleanedExtracted
         .split(RegExp(r'\s+'))
         .map((token) => token.trim())
-        .where(
-          (token) =>
-              token.isNotEmpty &&
-              token.length > 1 &&
-              !RegExp(r'^\d+$').hasMatch(token) &&
-              !_isIosNoiseToken(token),
-        )
-        .toList();
+        .toList(),
+      addressText: currentDireccion,
+    );
 
     if (tokens.length < 3) {
       if (currentNombre.isEmpty) {
-        data['nombre'] = cleanedExtracted;
+        final fallbackName = _sanitizeIosNameTokens(
+          cleanedExtracted.split(RegExp(r'\s+')).toList(),
+          addressText: currentDireccion,
+        ).join(' ');
+        if (fallbackName.isNotEmpty) {
+          data['nombre'] = fallbackName;
+        }
       }
       return;
     }
@@ -979,10 +989,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     ].where((value) => value.trim().isNotEmpty).join(' ').trim();
 
     if (rebuilt.isNotEmpty) {
-      final rebuiltTokens = _stripIosNameNoise(rebuilt)
-          .split(RegExp(r'\s+'))
-          .where((token) => token.trim().isNotEmpty)
-          .toList();
+      final rebuiltTokens = _sanitizeIosNameTokens(
+        _stripIosNameNoise(rebuilt).split(RegExp(r'\s+')).toList(),
+        addressText: currentDireccion,
+      );
       if (rebuiltTokens.length >= 3) {
         data['apellidoPaterno'] = rebuiltTokens[0];
         data['apellidoMaterno'] = rebuiltTokens[1];
@@ -1217,6 +1227,64 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final normalized = _stripIosNameNoise(value);
     if (normalized.isEmpty) return true;
     return _isIosNoiseLine(normalized);
+  }
+
+  bool _isIosAddressLikeNameToken(String token) {
+    return const {
+      'DOMICILIO',
+      'PRIV',
+      'PRIVADA',
+      'CALLE',
+      'AV',
+      'AVENIDA',
+      'COL',
+      'COLONIA',
+      'BARRIO',
+      'CONJ',
+      'CONJUNTO',
+      'JARDIN',
+      'JARDINES',
+      'LAGO',
+      'MEX',
+      'MEXICO',
+      'MEX.',
+      'NUM',
+      'NO',
+      'INT',
+      'EXT',
+      'CP',
+      'C.P',
+      'SECCION',
+      'SECCIÃ“N',
+      'VIGENCIA',
+      'CLAVE',
+      'CURP',
+    }.contains(token);
+  }
+
+  List<String> _sanitizeIosNameTokens(
+    List<String> tokens, {
+    String addressText = '',
+  }) {
+    final addressTokens = _stripIosAddressNoise(addressText)
+        .split(RegExp(r'\s+'))
+        .map((token) => token.trim())
+        .where((token) => token.length >= 4)
+        .toSet();
+
+    final cleaned = <String>[];
+    for (final rawToken in tokens) {
+      final token = _stripIosNameNoise(rawToken);
+      if (token.isEmpty) continue;
+      if (_isIosNoiseToken(token)) continue;
+      if (_isIosAddressLikeNameToken(token)) break;
+      if (RegExp(r'^\d+$').hasMatch(token)) break;
+      if (token.length < 2) continue;
+      if (addressTokens.contains(token) && cleaned.length >= 2) break;
+      cleaned.add(token);
+      if (cleaned.length >= 6) break;
+    }
+    return cleaned;
   }
 
   String _normalizeIosClaveElectoral(String current, String rawText) {
@@ -1784,9 +1852,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final fullCardProfiles =
           <({double contrast, double brightness, double gamma, int width})>[
             (contrast: 1.10, brightness: 0.02, gamma: 0.96, width: 2400),
-            (contrast: 1.22, brightness: 0.03, gamma: 0.92, width: 2600),
-            (contrast: 1.34, brightness: 0.02, gamma: 0.90, width: 2800),
-            (contrast: 1.42, brightness: 0.01, gamma: 0.88, width: 3000),
+            (contrast: 1.30, brightness: 0.02, gamma: 0.90, width: 2700),
           ];
       final profiles =
           <({double widthFactor, double heightFactor, double verticalCenter})>[
@@ -1796,29 +1862,9 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           verticalCenter: 0.54,
         ),
         (
-          widthFactor: 0.82,
-          heightFactor: 0.34,
-          verticalCenter: 0.50,
-        ),
-        (
           widthFactor: _iosOcrCropWidthFactor,
           heightFactor: _iosOcrCropHeightFactor,
           verticalCenter: 0.52,
-        ),
-        (
-          widthFactor: 0.44,
-          heightFactor: 0.22,
-          verticalCenter: 0.30,
-        ),
-        (
-          widthFactor: 0.56,
-          heightFactor: 0.24,
-          verticalCenter: 0.48,
-        ),
-        (
-          widthFactor: 0.60,
-          heightFactor: 0.22,
-          verticalCenter: 0.66,
         ),
         (
           widthFactor: 0.72,
