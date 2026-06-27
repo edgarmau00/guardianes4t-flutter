@@ -1,8 +1,10 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:doc_scan_flutter/doc_scan.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
@@ -14,6 +16,132 @@ import '../../services/ios_native_ine_scanner.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ocr_validation_service.dart';
 import '../../services/web_ocr_parser.dart';
+
+List<Map<String, Object>> _prepareIosCapturedImageCandidatesTask(
+  Map<String, Object> input,
+) {
+  final bytes = input['bytes'] as Uint8List;
+  final tempDirPath = input['tempDirPath'] as String;
+  final cropWidthFactor = input['cropWidthFactor'] as double;
+  final cropHeightFactor = input['cropHeightFactor'] as double;
+
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return const <Map<String, Object>>[];
+
+  final oriented = img.bakeOrientation(decoded);
+  final results = <Map<String, Object>>[];
+  final fullCardProfiles =
+      <({double contrast, double brightness, double gamma, int width})>[
+        (contrast: 1.10, brightness: 0.02, gamma: 0.96, width: 2400),
+        (contrast: 1.30, brightness: 0.02, gamma: 0.90, width: 2700),
+      ];
+  final profiles =
+      <({double widthFactor, double heightFactor, double verticalCenter})>[
+        (
+          widthFactor: 0.92,
+          heightFactor: 0.58,
+          verticalCenter: 0.54,
+        ),
+        (
+          widthFactor: cropWidthFactor,
+          heightFactor: cropHeightFactor,
+          verticalCenter: 0.52,
+        ),
+        (
+          widthFactor: 0.72,
+          heightFactor: 0.27,
+          verticalCenter: 0.53,
+        ),
+      ];
+  final nonce = DateTime.now().microsecondsSinceEpoch;
+
+  for (int i = 0; i < fullCardProfiles.length; i++) {
+    final profile = fullCardProfiles[i];
+    final resized = oriented.width == profile.width
+        ? oriented
+        : img.copyResize(oriented, width: profile.width);
+    final adjusted = img.adjustColor(
+      resized,
+      contrast: profile.contrast,
+      brightness: profile.brightness,
+      gamma: profile.gamma,
+    );
+    final sharpened = img.convolution(
+      adjusted,
+      filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+    );
+    final fullGray = img.grayscale(img.Image.from(sharpened));
+    final fullEnhanced = img.adjustColor(
+      fullGray,
+      contrast: math.min(profile.contrast + 0.22, 1.70),
+      brightness: math.max(profile.brightness - 0.01, -0.02),
+      gamma: math.max(profile.gamma - 0.03, 0.84),
+    );
+    final encoded = img.encodeJpg(fullEnhanced, quality: 98);
+    results.add(<String, Object>{
+      'path': p.join(tempDirPath, 'ios_manual_full_${i}_$nonce.jpg'),
+      'bytes': Uint8List.fromList(encoded),
+    });
+  }
+
+  for (int i = 0; i < profiles.length; i++) {
+    final profile = profiles[i];
+    final cropWidth = (oriented.width * profile.widthFactor).round();
+    final cropHeight = (oriented.height * profile.heightFactor).round();
+    final left = ((oriented.width - cropWidth) / 2).round().clamp(
+      0,
+      oriented.width - 1,
+    );
+    final top = ((oriented.height * profile.verticalCenter) - cropHeight / 2)
+        .round()
+        .clamp(0, oriented.height - 1);
+    final safeWidth = math.min(cropWidth, oriented.width - left);
+    final safeHeight = math.min(cropHeight, oriented.height - top);
+
+    if (safeWidth < 1100 || safeHeight < 600) {
+      continue;
+    }
+
+    final cropped = img.copyCrop(
+      oriented,
+      x: left,
+      y: top,
+      width: safeWidth,
+      height: safeHeight,
+    );
+
+    final normalized = cropped.width < 2600
+        ? img.copyResize(cropped, width: 2600)
+        : cropped;
+
+    final enhancedBase = img.adjustColor(
+      normalized,
+      contrast: 1.24,
+      brightness: 0.02,
+      gamma: 0.93,
+    );
+
+    final sharpened = img.convolution(
+      enhancedBase,
+      filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+    );
+
+    final enhanced = img.adjustColor(
+      img.grayscale(img.Image.from(sharpened)),
+      contrast: 1.26,
+      brightness: 0.01,
+      gamma: 0.92,
+    );
+
+    final encoded = img.encodeJpg(enhanced, quality: 98);
+    results.add(<String, Object>{
+      'path': p.join(tempDirPath, 'ios_manual_ocr_${i}_$nonce.jpg'),
+      'bytes': Uint8List.fromList(encoded),
+    });
+  }
+
+  return results;
+}
 
 class ScanIneScreen extends StatefulWidget {
   const ScanIneScreen({super.key});
@@ -568,6 +696,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       OcrValidationResult validation;
 
       if (Platform.isIOS) {
+        setState(() {
+          _processingMessage = 'Preparando captura para OCR...';
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 16));
         final iosCandidatePaths = await _prepareIosCapturedImageCandidates(
           imagePath,
         );
@@ -582,6 +714,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         }
 
         if (bestResult == null || !_isIosNativeResultStrong(bestResult.validation)) {
+          setState(() {
+            _processingMessage = 'Analizando texto de la credencial...';
+          });
+          await Future<void>.delayed(const Duration(milliseconds: 16));
           final refinedResult = await _scanIneWithIosRefinement(
             ocr,
             imagePath,
@@ -597,6 +733,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
         rawResult = bestResult.rawResult;
         validation = bestResult.validation;
+        setState(() {
+          _processingMessage = 'Ajustando campos detectados...';
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 16));
         final finalizedResult = await _finalizeIosResult(
           rawResult: rawResult,
           validation: validation,
@@ -684,6 +824,10 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     );
     var bestImagePath = imagePath;
 
+    if (_canFinalizeIosPrimaryQuickly(primaryValidation)) {
+      return bestResult;
+    }
+
     if (!_shouldRetryIosOcr(primaryValidation)) {
       return bestResult;
     }
@@ -765,6 +909,27 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
 
     return bestResult;
+  }
+
+  bool _canFinalizeIosPrimaryQuickly(OcrValidationResult validation) {
+    final normalized = validation.normalizedData;
+    final clave = (normalized['claveElectoral'] ?? '').trim();
+    final curp = (normalized['curp'] ?? '').trim();
+    final direccion = (normalized['direccion'] ?? '').trim();
+    final nombre = (normalized['nombre'] ?? '').trim();
+    final apellidoPaterno = (normalized['apellidoPaterno'] ?? '').trim();
+    final apellidoMaterno = (normalized['apellidoMaterno'] ?? '').trim();
+
+    if (validation.globalConfidence < 0.84) return false;
+    if (clave.length < 18 || curp.length < 18) return false;
+    if (direccion.length < 18) return false;
+    if (nombre.length < 3) return false;
+    if (apellidoPaterno.length < 3) return false;
+    if (apellidoMaterno.length < 3) return false;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.88) return false;
+    if ((validation.confidence['curp'] ?? 0) < 0.88) return false;
+    if ((validation.confidence['direccion'] ?? 0) < 0.65) return false;
+    return true;
   }
 
   bool _shouldRetryIosOcr(OcrValidationResult validation) {
@@ -909,12 +1074,6 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final currentMaterno = (data['apellidoMaterno'] ?? '').trim();
     final currentDireccion = (data['direccion'] ?? '').trim();
 
-    if (currentNombre.isNotEmpty &&
-        currentPaterno.isNotEmpty &&
-        currentMaterno.isNotEmpty) {
-      return;
-    }
-
     final upperText = _normalizeIosOcrText(rawText);
     final nombreBlock = RegExp(
       r'NOMBRE\s+([A-ZÑ.\s]+?)\s+DOMICILIO',
@@ -939,14 +1098,16 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         .toList();
 
     if (blockLines.length >= 3) {
-      if (currentPaterno.isEmpty) {
-        data['apellidoPaterno'] = blockLines[0];
-      }
-      if (currentMaterno.isEmpty) {
-        data['apellidoMaterno'] = blockLines[1];
-      }
-      if (currentNombre.isEmpty) {
-        data['nombre'] = blockLines.sublist(2).join(' ').trim();
+      data['apellidoPaterno'] = blockLines[0];
+      data['apellidoMaterno'] = blockLines[1];
+      final cleanedNombre = _sanitizeIosNombreValue(
+        blockLines.sublist(2).join(' ').trim(),
+        apellidoPaterno: data['apellidoPaterno'] ?? '',
+        apellidoMaterno: data['apellidoMaterno'] ?? '',
+        addressText: currentDireccion,
+      );
+      if (cleanedNombre.isNotEmpty) {
+        data['nombre'] = cleanedNombre;
       }
       return;
     }
@@ -960,14 +1121,14 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     );
 
     if (tokens.length < 3) {
-      if (currentNombre.isEmpty) {
-        final fallbackName = _sanitizeIosNameTokens(
-          cleanedExtracted.split(RegExp(r'\s+')).toList(),
-          addressText: currentDireccion,
-        ).join(' ');
-        if (fallbackName.isNotEmpty) {
-          data['nombre'] = fallbackName;
-        }
+      final fallbackName = _sanitizeIosNombreValue(
+        cleanedExtracted,
+        apellidoPaterno: currentPaterno,
+        apellidoMaterno: currentMaterno,
+        addressText: currentDireccion,
+      );
+      if (fallbackName.isNotEmpty) {
+        data['nombre'] = fallbackName;
       }
       return;
     }
@@ -978,8 +1139,14 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if (currentMaterno.isEmpty) {
       data['apellidoMaterno'] = tokens[1];
     }
-    if (currentNombre.isEmpty) {
-      data['nombre'] = tokens.sublist(2).join(' ');
+    final normalizedNombre = _sanitizeIosNombreValue(
+      tokens.sublist(2).join(' '),
+      apellidoPaterno: data['apellidoPaterno'] ?? currentPaterno,
+      apellidoMaterno: data['apellidoMaterno'] ?? currentMaterno,
+      addressText: currentDireccion,
+    );
+    if (normalizedNombre.isNotEmpty) {
+      data['nombre'] = normalizedNombre;
     }
 
     final rebuilt = [
@@ -996,8 +1163,26 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (rebuiltTokens.length >= 3) {
         data['apellidoPaterno'] = rebuiltTokens[0];
         data['apellidoMaterno'] = rebuiltTokens[1];
-        data['nombre'] = rebuiltTokens.sublist(2).join(' ');
+        final rebuiltNombre = _sanitizeIosNombreValue(
+          rebuiltTokens.sublist(2).join(' '),
+          apellidoPaterno: rebuiltTokens[0],
+          apellidoMaterno: rebuiltTokens[1],
+          addressText: currentDireccion,
+        );
+        if (rebuiltNombre.isNotEmpty) {
+          data['nombre'] = rebuiltNombre;
+        }
       }
+    }
+
+    final existingNombre = _sanitizeIosNombreValue(
+      data['nombre'] ?? currentNombre,
+      apellidoPaterno: data['apellidoPaterno'] ?? currentPaterno,
+      apellidoMaterno: data['apellidoMaterno'] ?? currentMaterno,
+      addressText: currentDireccion,
+    );
+    if (existingNombre.isNotEmpty) {
+      data['nombre'] = existingNombre;
     }
   }
 
@@ -1229,6 +1414,24 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     return _isIosNoiseLine(normalized);
   }
 
+  bool _isIosInstitutionLikeToken(String token) {
+    final normalized = _stripIosNameNoise(token);
+    if (normalized.isEmpty) return true;
+    return const <String>[
+      'INSTIT',
+      'NACION',
+      'ELECT',
+      'CREDEN',
+      'VOT',
+      'MEX',
+      'UNID',
+      'MEXIC',
+      'ESTAD',
+      'CRED',
+      'PARA',
+    ].any(normalized.startsWith);
+  }
+
   bool _isIosAddressLikeNameToken(String token) {
     return const {
       'DOMICILIO',
@@ -1277,6 +1480,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       final token = _stripIosNameNoise(rawToken);
       if (token.isEmpty) continue;
       if (_isIosNoiseToken(token)) continue;
+      if (_isIosInstitutionLikeToken(token)) continue;
       if (_isIosAddressLikeNameToken(token)) break;
       if (RegExp(r'^\d+$').hasMatch(token)) break;
       if (token.length < 2) continue;
@@ -1285,6 +1489,49 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       if (cleaned.length >= 6) break;
     }
     return cleaned;
+  }
+
+  String _sanitizeIosNombreValue(
+    String value, {
+    String apellidoPaterno = '',
+    String apellidoMaterno = '',
+    String addressText = '',
+  }) {
+    final rawTokens = _stripIosNameNoise(value)
+        .split(RegExp(r'\s+'))
+        .map((token) => token.trim())
+        .where((token) => token.isNotEmpty)
+        .toList();
+
+    if (rawTokens.isEmpty) return '';
+
+    final addressTokens = _stripIosAddressNoise(addressText)
+        .split(RegExp(r'\s+'))
+        .map((token) => token.trim())
+        .where((token) => token.length >= 3)
+        .toSet();
+
+    final blockedSurnames = <String>{
+      ..._stripIosNameNoise(apellidoPaterno).split(RegExp(r'\s+')),
+      ..._stripIosNameNoise(apellidoMaterno).split(RegExp(r'\s+')),
+    }.where((token) => token.isNotEmpty).toSet();
+
+    final cleaned = <String>[];
+    for (final rawToken in rawTokens) {
+      final token = _stripIosNameNoise(rawToken);
+      if (token.isEmpty) continue;
+      if (_isIosNoiseToken(token)) continue;
+      if (_isIosInstitutionLikeToken(token)) continue;
+      if (_isIosAddressLikeNameToken(token)) break;
+      if (RegExp(r'\d').hasMatch(token)) break;
+      if (blockedSurnames.contains(token)) continue;
+      if (addressTokens.contains(token)) break;
+      if (token.length < 2) continue;
+      cleaned.add(token);
+      if (cleaned.length >= 3) break;
+    }
+
+    return cleaned.join(' ').trim();
   }
 
   String _normalizeIosClaveElectoral(String current, String rawText) {
@@ -1843,129 +2090,26 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     try {
       final bytes = await File(imagePath).readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) return <String>[imagePath];
-
-      final oriented = img.bakeOrientation(decoded);
       final results = <String>[imagePath];
       final tempDir = await getTemporaryDirectory();
-      final fullCardProfiles =
-          <({double contrast, double brightness, double gamma, int width})>[
-            (contrast: 1.10, brightness: 0.02, gamma: 0.96, width: 2400),
-            (contrast: 1.30, brightness: 0.02, gamma: 0.90, width: 2700),
-          ];
-      final profiles =
-          <({double widthFactor, double heightFactor, double verticalCenter})>[
-        (
-          widthFactor: 0.92,
-          heightFactor: 0.58,
-          verticalCenter: 0.54,
-        ),
-        (
-          widthFactor: _iosOcrCropWidthFactor,
-          heightFactor: _iosOcrCropHeightFactor,
-          verticalCenter: 0.52,
-        ),
-        (
-          widthFactor: 0.72,
-          heightFactor: 0.27,
-          verticalCenter: 0.53,
-        ),
-      ];
+      final preparedImages = await compute(
+        _prepareIosCapturedImageCandidatesTask,
+        <String, Object>{
+          'bytes': bytes,
+          'tempDirPath': tempDir.path,
+          'cropWidthFactor': _iosOcrCropWidthFactor,
+          'cropHeightFactor': _iosOcrCropHeightFactor,
+        },
+      );
 
-      for (int i = 0; i < fullCardProfiles.length; i++) {
-        final profile = fullCardProfiles[i];
-        final resized = oriented.width < profile.width
-            ? img.copyResize(oriented, width: profile.width)
-            : oriented.width > profile.width
-                ? img.copyResize(oriented, width: profile.width)
-                : oriented;
-        final adjusted = img.adjustColor(
-          resized,
-          contrast: profile.contrast,
-          brightness: profile.brightness,
-          gamma: profile.gamma,
-        );
-        final sharpened = img.convolution(
-          adjusted,
-          filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
-        );
-        final fullGray = img.grayscale(img.Image.from(sharpened));
-        final fullEnhanced = img.adjustColor(
-          fullGray,
-          contrast: math.min(profile.contrast + 0.22, 1.70),
-          brightness: math.max(profile.brightness - 0.01, -0.02),
-          gamma: math.max(profile.gamma - 0.03, 0.84),
-        );
-        final fullPath = p.join(
-          tempDir.path,
-          'ios_manual_full_${i}_${DateTime.now().microsecondsSinceEpoch}.jpg',
-        );
-        await File(fullPath).writeAsBytes(
-          img.encodeJpg(fullEnhanced, quality: 98),
-        );
-        results.add(fullPath);
-      }
-
-      for (int i = 0; i < profiles.length; i++) {
-        final profile = profiles[i];
-        final cropWidth = (oriented.width * profile.widthFactor).round();
-        final cropHeight = (oriented.height * profile.heightFactor).round();
-        final left = ((oriented.width - cropWidth) / 2).round().clamp(
-          0,
-          oriented.width - 1,
-        );
-        final top = ((oriented.height * profile.verticalCenter) - cropHeight / 2)
-            .round()
-            .clamp(0, oriented.height - 1);
-        final safeWidth = math.min(cropWidth, oriented.width - left);
-        final safeHeight = math.min(cropHeight, oriented.height - top);
-
-        if (safeWidth < 1100 || safeHeight < 600) {
+      for (final item in preparedImages) {
+        final path = item['path'] as String?;
+        final candidateBytes = item['bytes'] as Uint8List?;
+        if (path == null || candidateBytes == null || candidateBytes.isEmpty) {
           continue;
         }
-
-        final cropped = img.copyCrop(
-          oriented,
-          x: left,
-          y: top,
-          width: safeWidth,
-          height: safeHeight,
-        );
-
-        final normalized = cropped.width < 2600
-            ? img.copyResize(cropped, width: 2600)
-            : cropped;
-
-        final enhancedBase = img.adjustColor(
-          normalized,
-          contrast: 1.24,
-          brightness: 0.02,
-          gamma: 0.93,
-        );
-
-        final sharpened = img.convolution(
-          enhancedBase,
-          filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
-        );
-
-        final enhanced = img.adjustColor(
-          img.grayscale(img.Image.from(sharpened)),
-          contrast: 1.26,
-          brightness: 0.01,
-          gamma: 0.92,
-        );
-
-        final croppedPath = p.join(
-          tempDir.path,
-          'ios_manual_ocr_${i}_${DateTime.now().microsecondsSinceEpoch}.jpg',
-        );
-
-        await File(croppedPath).writeAsBytes(
-          img.encodeJpg(enhanced, quality: 98),
-        );
-
-        results.add(croppedPath);
+        await File(path).writeAsBytes(candidateBytes, flush: true);
+        results.add(path);
       }
 
       return results;
