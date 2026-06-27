@@ -32,8 +32,7 @@ List<Map<String, Object>> _prepareIosCapturedImageCandidatesTask(
   final results = <Map<String, Object>>[];
   final fullCardProfiles =
       <({double contrast, double brightness, double gamma, int width})>[
-        (contrast: 1.10, brightness: 0.02, gamma: 0.96, width: 2400),
-        (contrast: 1.30, brightness: 0.02, gamma: 0.90, width: 2700),
+        (contrast: 1.18, brightness: 0.02, gamma: 0.93, width: 2300),
       ];
   final profiles =
       <({double widthFactor, double heightFactor, double verticalCenter})>[
@@ -46,11 +45,6 @@ List<Map<String, Object>> _prepareIosCapturedImageCandidatesTask(
           widthFactor: cropWidthFactor,
           heightFactor: cropHeightFactor,
           verticalCenter: 0.52,
-        ),
-        (
-          widthFactor: 0.72,
-          heightFactor: 0.27,
-          verticalCenter: 0.53,
         ),
       ];
   final nonce = DateTime.now().microsecondsSinceEpoch;
@@ -141,6 +135,42 @@ List<Map<String, Object>> _prepareIosCapturedImageCandidatesTask(
   }
 
   return results;
+}
+
+Map<String, Object>? _createIosEnhancedImageTask(Map<String, Object> input) {
+  final bytes = input['bytes'] as Uint8List;
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return null;
+
+  var working = img.bakeOrientation(decoded);
+  if (working.width > 2400) {
+    working = img.copyResize(working, width: 2400);
+  } else if (working.width < 2100) {
+    working = img.copyResize(working, width: 2100);
+  }
+
+  final normalized = img.adjustColor(
+    working,
+    contrast: 1.24,
+    brightness: 0.02,
+    gamma: 0.94,
+    saturation: 1.0,
+  );
+  final sharpened = img.convolution(
+    normalized,
+    filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+  );
+  final gray = img.grayscale(img.Image.from(sharpened));
+  final enhanced = img.adjustColor(
+    gray,
+    contrast: 1.54,
+    brightness: 0.01,
+    gamma: 0.89,
+  );
+
+  return <String, Object>{
+    'bytes': Uint8List.fromList(img.encodeJpg(enhanced, quality: 95)),
+  };
 }
 
 class ScanIneScreen extends StatefulWidget {
@@ -616,6 +646,11 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     }
   }
 
+  Future<void> _yieldProcessingUi() async {
+    await Future<void>.delayed(Duration.zero);
+    await WidgetsBinding.instance.endOfFrame;
+  }
+
   Future<bool> _processImagePath(
     String imagePath, {
     Map<String, String>? preferredRawResult,
@@ -652,7 +687,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
       _processing = true;
       _processingMessage = 'Validando calidad de imagen...';
     });
-    await Future<void>.delayed(const Duration(milliseconds: 16));
+    await _yieldProcessingUi();
 
     final qualityCheck = await _validateImageQuality(imagePath);
     if (qualityCheck.blockingMessage != null) {
@@ -687,7 +722,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     setState(() {
       _processingMessage = 'Corrigiendo imagen y leyendo datos...';
     });
-    await Future<void>.delayed(const Duration(milliseconds: 16));
+    await _yieldProcessingUi();
 
     final ocr = OcrService();
     final validator = OcrValidationService();
@@ -699,7 +734,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {
           _processingMessage = 'Preparando captura para OCR...';
         });
-        await Future<void>.delayed(const Duration(milliseconds: 16));
+        await _yieldProcessingUi();
         final iosCandidatePaths = await _prepareIosCapturedImageCandidates(
           imagePath,
         );
@@ -717,7 +752,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
           setState(() {
             _processingMessage = 'Analizando texto de la credencial...';
           });
-          await Future<void>.delayed(const Duration(milliseconds: 16));
+          await _yieldProcessingUi();
           final refinedResult = await _scanIneWithIosRefinement(
             ocr,
             imagePath,
@@ -736,7 +771,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         setState(() {
           _processingMessage = 'Ajustando campos detectados...';
         });
-        await Future<void>.delayed(const Duration(milliseconds: 16));
+        await _yieldProcessingUi();
         final finalizedResult = await _finalizeIosResult(
           rawResult: rawResult,
           validation: validation,
@@ -878,13 +913,17 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       if (_iosValidationScore(refinedValidation) >
           _iosValidationScore(bestResult.validation)) {
-        return _IosOcrResult(
+        bestResult = _IosOcrResult(
           rawResult: refinedRaw,
           validation: refinedValidation,
         );
       }
     } catch (_) {
       // Si el refinado falla, conservamos el mejor resultado previo.
+    }
+
+    if (_canFinalizeIosRefinedQuickly(bestResult.validation)) {
+      return bestResult;
     }
 
     if (_needsIosRegionRecovery(bestResult.validation)) {
@@ -929,6 +968,32 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if ((validation.confidence['claveElectoral'] ?? 0) < 0.88) return false;
     if ((validation.confidence['curp'] ?? 0) < 0.88) return false;
     if ((validation.confidence['direccion'] ?? 0) < 0.65) return false;
+    return true;
+  }
+
+  bool _canFinalizeIosRefinedQuickly(OcrValidationResult validation) {
+    final normalized = validation.normalizedData;
+    final clave = (normalized['claveElectoral'] ?? '').trim();
+    final curp = (normalized['curp'] ?? '').trim();
+    final direccion = (normalized['direccion'] ?? '').trim();
+    final nombre = (normalized['nombre'] ?? '').trim();
+    final apellidoPaterno = (normalized['apellidoPaterno'] ?? '').trim();
+    final apellidoMaterno = (normalized['apellidoMaterno'] ?? '').trim();
+    final fechaNacimiento = (normalized['fechaNacimiento'] ?? '').trim();
+    final seccionElectoral = (normalized['seccionElectoral'] ?? '').trim();
+
+    if (validation.globalConfidence < 0.88) return false;
+    if (clave.length < 18 || curp.length < 18) return false;
+    if (direccion.length < 22) return false;
+    if (nombre.length < 3) return false;
+    if (apellidoPaterno.length < 3) return false;
+    if (apellidoMaterno.length < 3) return false;
+    if (fechaNacimiento.length < 8) return false;
+    if (seccionElectoral.length < 3) return false;
+    if ((validation.confidence['claveElectoral'] ?? 0) < 0.91) return false;
+    if ((validation.confidence['curp'] ?? 0) < 0.91) return false;
+    if ((validation.confidence['direccion'] ?? 0) < 0.74) return false;
+    if ((validation.confidence['nombre'] ?? 0) < 0.70) return false;
     return true;
   }
 
@@ -978,6 +1043,55 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     if ((validation.confidence['claveElectoral'] ?? 0) < 0.92) return true;
     if ((validation.confidence['curp'] ?? 0) < 0.92) return true;
     return false;
+  }
+
+  List<String> _iosRequiredRecoveryRegions(OcrValidationResult validation) {
+    final normalized = validation.normalizedData;
+    final required = <String>{};
+
+    final nombre = (normalized['nombre'] ?? '').trim();
+    final apellidoPaterno = (normalized['apellidoPaterno'] ?? '').trim();
+    final apellidoMaterno = (normalized['apellidoMaterno'] ?? '').trim();
+    final direccion = (normalized['direccion'] ?? '').trim();
+    final clave = (normalized['claveElectoral'] ?? '').trim();
+    final curp = (normalized['curp'] ?? '').trim();
+    final fechaNacimiento = (normalized['fechaNacimiento'] ?? '').trim();
+    final seccionElectoral = (normalized['seccionElectoral'] ?? '').trim();
+    final vigencia = (normalized['vigencia'] ?? '').trim();
+    final sexo = (normalized['sexo'] ?? '').trim();
+
+    if (nombre.length < 3 ||
+        apellidoPaterno.length < 3 ||
+        apellidoMaterno.length < 3 ||
+        (validation.confidence['nombre'] ?? 0) < 0.68) {
+      required.add('nombreBloque');
+    }
+
+    if (direccion.length < 20 ||
+        (validation.confidence['direccion'] ?? 0) < 0.68) {
+      required.add('direccion');
+    }
+
+    if (clave.length < 18 ||
+        (validation.confidence['claveElectoral'] ?? 0) < 0.92) {
+      required.add('claveElectoral');
+    }
+
+    if (curp.length < 18 || (validation.confidence['curp'] ?? 0) < 0.92) {
+      required.add('curp');
+    }
+
+    if (fechaNacimiento.length < 8 ||
+        seccionElectoral.length < 3 ||
+        vigencia.length < 4 ||
+        sexo.isEmpty ||
+        (validation.confidence['fechaNacimiento'] ?? 0) < 0.84 ||
+        (validation.confidence['seccionElectoral'] ?? 0) < 0.82 ||
+        (validation.confidence['vigencia'] ?? 0) < 0.80) {
+      required.add('metaDerecha');
+    }
+
+    return required.toList(growable: false);
   }
 
   bool _isIosNativeResultStrong(OcrValidationResult validation) {
@@ -1647,34 +1761,18 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
   Future<String?> _createIosEnhancedImage(String imagePath) async {
     try {
       final bytes = await File(imagePath).readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) return null;
+      final enhancedResult = await compute(
+        _createIosEnhancedImageTask,
+        <String, Object>{
+          'bytes': bytes,
+        },
+      );
+      if (enhancedResult == null) return null;
 
-      var working = img.bakeOrientation(decoded);
-      if (working.width > 2600) {
-        working = img.copyResize(working, width: 2600);
-      } else if (working.width < 2200) {
-        working = img.copyResize(working, width: 2200);
+      final enhancedBytes = enhancedResult['bytes'] as Uint8List?;
+      if (enhancedBytes == null || enhancedBytes.isEmpty) {
+        return null;
       }
-
-      final normalized = img.adjustColor(
-        working,
-        contrast: 1.26,
-        brightness: 0.02,
-        gamma: 0.94,
-        saturation: 1.0,
-      );
-      final sharpened = img.convolution(
-        normalized,
-        filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
-      );
-      final gray = img.grayscale(img.Image.from(sharpened));
-      final enhanced = img.adjustColor(
-        gray,
-        contrast: 1.58,
-        brightness: 0.01,
-        gamma: 0.88,
-      );
 
       final tempDir = await getTemporaryDirectory();
       final refinedPath = p.join(
@@ -1682,9 +1780,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         'ios_ocr_refined_${DateTime.now().microsecondsSinceEpoch}.jpg',
       );
 
-      await File(refinedPath).writeAsBytes(
-        img.encodeJpg(enhanced, quality: 96),
-      );
+      await File(refinedPath).writeAsBytes(enhancedBytes, flush: true);
 
       return refinedPath;
     } catch (_) {
@@ -1703,11 +1799,17 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) return baseRaw;
 
+    final validation = OcrValidationService().validate(baseRaw);
+    final requiredRegions = _iosRequiredRecoveryRegions(validation);
+    if (requiredRegions.isEmpty) {
+      return baseRaw;
+    }
+
     var working = img.bakeOrientation(decoded);
-    if (working.width < 2400) {
-      working = img.copyResize(working, width: 2400);
-    } else if (working.width > 2800) {
-      working = img.copyResize(working, width: 2800);
+    if (working.width < 2100) {
+      working = img.copyResize(working, width: 2100);
+    } else if (working.width > 2500) {
+      working = img.copyResize(working, width: 2500);
     }
 
     final merged = Map<String, String>.from(baseRaw);
@@ -1749,6 +1851,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
     for (final entry in regionVariants.entries) {
       final regionKey = entry.key;
+      if (!requiredRegions.contains(regionKey)) continue;
       Map<String, String>? bestRegionRaw;
       String bestRegionText = '';
       double bestScore = double.negativeInfinity;
