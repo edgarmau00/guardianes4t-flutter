@@ -77,7 +77,7 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         : 'Se guardo localmente.\n\nDetalle:\n$syncMessage';
   }
 
-  Future<bool> _existsInLocalDb({
+  Future<bool> _existsBlockingLocalDuplicate({
     required String email,
     required String phone,
   }) async {
@@ -85,8 +85,8 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
 
     final rows = await db.query(
       'leader_records',
-      where: 'LOWER(email) = ? OR phone = ?',
-      whereArgs: [email.trim().toLowerCase(), phone.trim()],
+      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [0, 3, email.trim().toLowerCase(), phone.trim()],
       limit: 1,
     );
 
@@ -115,7 +115,7 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     });
   }
 
-  Future<void> _clearSyncedLocalDuplicates({
+  Future<void> _clearResolvedLocalDuplicates({
     required String email,
     required String phone,
   }) async {
@@ -123,8 +123,8 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
 
     await db.delete(
       'leader_records',
-      where: 'sync_status = ? AND (LOWER(email) = ? OR phone = ?)',
-      whereArgs: [1, email.trim().toLowerCase(), phone.trim()],
+      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [1, 2, email.trim().toLowerCase(), phone.trim()],
     );
   }
 
@@ -324,13 +324,7 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           return;
         }
 
-        final authExists = await AuthService().leaderAccessExists(email);
-        if (authExists) {
-          _showSnack('El correo ya tiene un acceso creado');
-          return;
-        }
-
-        await _clearSyncedLocalDuplicates(email: email, phone: phone);
+        await _clearResolvedLocalDuplicates(email: email, phone: phone);
 
         final existsPendingLocal = await _existsPendingInLocalDb(
           email: email,
@@ -341,7 +335,10 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           return;
         }
       } else {
-        final existsLocal = await _existsInLocalDb(email: email, phone: phone);
+        final existsLocal = await _existsBlockingLocalDuplicate(
+          email: email,
+          phone: phone,
+        );
         if (existsLocal) {
           _showSnack('Este ya se encuentra registrado');
           return;
@@ -505,13 +502,13 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
+      AppDataBus.notify();
       await SyncService().syncPendingLeaders();
 
       final savedRows = await db.query(
         'leader_records',
-        where: 'LOWER(email) = ? AND phone = ?',
-        whereArgs: [email, phone],
-        orderBy: 'created_at DESC',
+        where: 'local_id = ?',
+        whereArgs: [localId],
         limit: 1,
       );
 

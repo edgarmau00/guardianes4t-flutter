@@ -23,6 +23,7 @@ class SyncService {
 
   void startListening() {
     _pollingTimer?.cancel();
+    unawaited(syncAll());
     _pollingTimer = Timer.periodic(const Duration(seconds: 8), (_) async {
       final hasInternet = await _hasInternet();
       final regainedInternet = _lastInternetState == false && hasInternet;

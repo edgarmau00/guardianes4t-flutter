@@ -732,7 +732,7 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
 
       if (Platform.isIOS) {
         setState(() {
-          _processingMessage = 'Preparando captura para OCR...';
+          _processingMessage = 'Extrayendo datos de la credencial...';
         });
         await _yieldProcessingUi();
         final iosCandidatePaths = await _prepareIosCapturedImageCandidates(
@@ -1306,17 +1306,32 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
     final currentEstado = (data['estado'] ?? '').trim();
     final currentPostalCode = (data['codigoPostal'] ?? '').trim();
 
+    final multilineAddress = _extractIosAddressBlock(rawText);
+    if (multilineAddress.isNotEmpty) {
+      final currentClean = _stripIosAddressNoise(currentAddress);
+      if (multilineAddress.length > currentClean.length ||
+          currentClean.length < 20) {
+        data['direccion'] = multilineAddress;
+      }
+    }
+
     final upperText = _normalizeIosOcrText(rawText);
     final domicilioMatch = RegExp(
       r'DOMICILIO\s+(.+?)\s+CLAVE\s+DE\s+ELECTOR',
       dotAll: true,
     ).firstMatch(upperText);
 
-    if (currentAddress.isEmpty && domicilioMatch != null) {
-      data['direccion'] = _stripIosAddressNoise(domicilioMatch.group(1)!);
+    if (((data['direccion'] ?? '').trim().isEmpty || currentAddress.length < 20) &&
+        domicilioMatch != null) {
+      final compactAddress = _stripIosAddressNoise(domicilioMatch.group(1)!);
+      if (compactAddress.length > ((data['direccion'] ?? '').trim().length)) {
+        data['direccion'] = compactAddress;
+      }
     }
 
-    final addressSource = _stripIosAddressNoise((data['direccion'] ?? '').trim());
+    final addressSource = _sanitizeIosDireccionValue(
+      _stripIosAddressNoise((data['direccion'] ?? '').trim()),
+    );
     if (addressSource.isEmpty) return;
 
     data['direccion'] = addressSource;
@@ -1343,6 +1358,88 @@ class _ScanIneScreenState extends State<ScanIneScreen> {
         data['codigoPostal'] = municipalityStateMatch.group(3)!.trim();
       }
     }
+  }
+
+  String _extractIosAddressBlock(String rawText) {
+    final lines = rawText
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => _cleanIosAddressText(line))
+        .where((line) => line.isNotEmpty)
+        .toList();
+
+    if (lines.isEmpty) return '';
+
+    int startIndex = -1;
+    for (int i = 0; i < lines.length; i++) {
+      if (lines[i].contains('DOMICILIO')) {
+        startIndex = i;
+        break;
+      }
+    }
+    if (startIndex == -1) return '';
+
+    final collected = <String>[];
+    for (int i = startIndex; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.contains('DOMICILIO')) {
+        line = line.replaceAll(RegExp(r'\bDOMICILIO\b'), '').trim();
+      }
+      if (line.isEmpty) continue;
+
+      final stopLine = line.contains('CLAVE DE ELECTOR') ||
+          line.contains('CURP') ||
+          line.contains('FECHA DE NACIMIENTO') ||
+          line.contains('ANO DE REGISTRO') ||
+          line.contains('AÑO DE REGISTRO') ||
+          line.contains('SECCION') ||
+          line.contains('SECCIÓN') ||
+          line.contains('VIGENCIA');
+      if (stopLine) break;
+
+      final cleaned = _stripIosAddressNoise(line);
+      if (cleaned.isEmpty) continue;
+      if (_looksLikeIosAddressTail(cleaned)) break;
+
+      collected.add(cleaned);
+      if (collected.length >= 2) break;
+    }
+
+    if (collected.isEmpty) return '';
+
+    final merged = collected.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    return _sanitizeIosDireccionValue(_stripIosAddressNoise(merged));
+  }
+
+  bool _looksLikeIosAddressTail(String line) {
+    final upper = _normalizeIosOcrText(line);
+    return RegExp(r'\b\d{5}\b').hasMatch(upper) ||
+        upper.contains('MEX.') ||
+        upper.contains('MEXICO') ||
+        upper.contains('EDO.') ||
+        upper.contains('ESTADO') ||
+        upper.contains(',');
+  }
+
+  String _sanitizeIosDireccionValue(String value) {
+    var cleaned = value.trim();
+    if (cleaned.isEmpty) return '';
+
+    cleaned = cleaned.replaceAll(
+      RegExp(
+        r'\s+\b\d{5}\b(?:\s+[A-ZÁÉÍÓÚÑ.]+(?:,\s*[A-ZÁÉÍÓÚÑ.]+\.?)?)?$',
+        caseSensitive: false,
+      ),
+      '',
+    );
+    cleaned = cleaned.replaceAll(
+      RegExp(
+        r'\s+[A-ZÁÉÍÓÚÑ ]+,\s*[A-ZÁÉÍÓÚÑ.]+\.?$',
+        caseSensitive: false,
+      ),
+      '',
+    );
+
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   void _repairIosIdentityFields(Map<String, String> data, String rawText) {

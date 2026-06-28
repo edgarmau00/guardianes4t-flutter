@@ -40,6 +40,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isPrivilegedAdmin(String role) =>
       role == 'superadmin' || role == 'admin';
 
+  bool _isRegisteredRow(Map<String, dynamic> row) =>
+      (row['sync_status'] as int? ?? 0) != 2;
+
   @override
   void initState() {
     super.initState();
@@ -114,18 +117,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .where((row) => (row['leader_role'] ?? '').toString() == 'promoter')
           .toList();
 
-      nextLeadersRegistered = parentRows.length;
+      nextLeadersRegistered =
+          parentRows.where((row) => _isRegisteredRow(row)).length;
       nextLeadersPending =
           parentRows.where((row) => [0, 3].contains(row['sync_status'])).length;
       nextLeadersRejected =
           parentRows.where((row) => row['sync_status'] == 2).length;
-      nextPromotersRegistered = promoterRows.length;
+      nextPromotersRegistered =
+          promoterRows.where((row) => _isRegisteredRow(row)).length;
       nextPromotersPending = promoterRows
           .where((row) => [0, 3].contains(row['sync_status']))
           .length;
       nextPromotersRejected =
           promoterRows.where((row) => row['sync_status'] == 2).length;
-      nextGuardiansRegistered = promotedRows.length;
+      nextGuardiansRegistered =
+          promotedRows.where((row) => _isRegisteredRow(row)).length;
       nextGuardiansPending = promotedRows
           .where((row) => [0, 3].contains(row['sync_status']))
           .length;
@@ -176,18 +182,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
             parentRemoteIds.contains(ownerLocalId);
       }).toList();
 
-      nextLeadersRegistered = parentRows.length;
+      nextLeadersRegistered =
+          parentRows.where((row) => _isRegisteredRow(row)).length;
       nextLeadersPending =
           parentRows.where((row) => [0, 3].contains(row['sync_status'])).length;
       nextLeadersRejected =
           parentRows.where((row) => row['sync_status'] == 2).length;
-      nextPromotersRegistered = promoterRows.length;
+      nextPromotersRegistered =
+          promoterRows.where((row) => _isRegisteredRow(row)).length;
       nextPromotersPending = promoterRows
           .where((row) => [0, 3].contains(row['sync_status']))
           .length;
       nextPromotersRejected =
           promoterRows.where((row) => row['sync_status'] == 2).length;
-      nextGuardiansRegistered = managedGuardianRows.length;
+      nextGuardiansRegistered =
+          managedGuardianRows.where((row) => _isRegisteredRow(row)).length;
       nextGuardiansPending = managedGuardianRows
           .where((row) => [0, 3].contains(row['sync_status']))
           .length;
@@ -211,13 +220,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
               (row['leader_role'] ?? '').toString() == 'promoter')
           .toList();
 
-      nextGuardiansRegistered = managedGuardians.length;
+      nextGuardiansRegistered =
+          managedGuardians.where((row) => _isRegisteredRow(row)).length;
       nextGuardiansPending = managedGuardians
           .where((row) => [0, 3].contains(row['sync_status']))
           .length;
       nextGuardiansRejected =
           managedGuardians.where((row) => row['sync_status'] == 2).length;
-      nextLeadersRegistered = promoters.length;
+      nextLeadersRegistered =
+          promoters.where((row) => _isRegisteredRow(row)).length;
       nextLeadersPending =
           promoters.where((row) => [0, 3].contains(row['sync_status'])).length;
       nextLeadersRejected =
@@ -229,7 +240,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final mine = promotedRows
           .where((row) => (row['capturist_id'] ?? '').toString() == uid)
           .toList();
-      nextGuardiansRegistered = mine.length;
+      nextGuardiansRegistered = mine.where((row) => _isRegisteredRow(row)).length;
       nextGuardiansPending =
           mine.where((row) => [0, 3].contains(row['sync_status'])).length;
       nextGuardiansRejected =

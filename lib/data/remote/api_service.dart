@@ -85,26 +85,33 @@ class ApiService {
   }
 
   Future<Map<String, dynamic>> uploadLeader(Map<String, dynamic> leader) async {
+    final parentLeaderId = _nullableString(
+      leader['parent_leader_remote_id'] ?? leader['parent_leader_local_id'],
+    );
+    final body = <String, dynamic>{
+      'email': (leader['email'] ?? '').toString().trim().toLowerCase(),
+      'password': (leader['password'] ?? '').toString().trim(),
+      'fullName': (leader['full_name'] ?? '').toString().trim(),
+      'phone': (leader['phone'] ?? '').toString().trim(),
+      'leaderRole': (leader['leader_role'] ?? 'leader_parent').toString(),
+      'targetAdminId': _nullableString(leader['owner_admin_user_id']),
+    };
+
+    if (parentLeaderId != null) {
+      body['parentLeaderId'] = parentLeaderId;
+    }
+
     final response = await _client.postJson(
       '/api/leaders',
       bearerToken: _requireToken(),
-      body: {
-        'email': (leader['email'] ?? '').toString().trim().toLowerCase(),
-        'password': (leader['password'] ?? '').toString().trim(),
-        'fullName': (leader['full_name'] ?? '').toString().trim(),
-        'phone': (leader['phone'] ?? '').toString().trim(),
-        'leaderRole': (leader['leader_role'] ?? 'leader_parent').toString(),
-        'targetAdminId': _nullableString(leader['owner_admin_user_id']),
-        'parentLeaderId': _nullableString(
-          leader['parent_leader_remote_id'] ?? leader['parent_leader_local_id'],
-        ),
-      },
+      body: body,
     );
 
     final createdLeader = response['item'] as Map<String, dynamic>;
     final role = (leader['leader_role'] ?? 'leader_parent').toString().trim();
     final leaderUserId = (createdLeader['id'] ?? '').toString();
-    final parentLeaderId = _nullableString(createdLeader['parent_leader_id']) ??
+    final createdParentLeaderId =
+        _nullableString(createdLeader['parent_leader_id']) ??
         _nullableString(leader['parent_leader_auth_user_id']) ??
         _nullableString(leader['parent_leader_remote_id']) ??
         _nullableString(leader['parent_leader_local_id']);
@@ -124,8 +131,8 @@ class ApiService {
           (createdLeader['owner_admin_name'] ?? leader['owner_admin_name'] ?? '').toString(),
       'owner_admin_email':
           (createdLeader['owner_admin_email'] ?? leader['owner_admin_email'] ?? '').toString(),
-      'parent_leader_remote_id': parentLeaderId,
-      'parent_leader_auth_user_id': parentLeaderId,
+      'parent_leader_remote_id': createdParentLeaderId,
+      'parent_leader_auth_user_id': createdParentLeaderId,
       'root_leader_remote_id': rootLeaderId,
       'root_leader_auth_user_id': rootLeaderId,
       'root_leader_name': role == 'leader_parent'

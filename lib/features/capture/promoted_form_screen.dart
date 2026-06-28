@@ -178,13 +178,13 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     });
   }
 
-  Future<bool> _existsInLocalDb(String claveElectoral) async {
+  Future<bool> _existsBlockingLocalDuplicate(String claveElectoral) async {
     final db = await LocalDb.instance.database;
 
     final rows = await db.query(
       'promoted_records',
-      where: 'UPPER(clave_electoral) = ?',
-      whereArgs: [claveElectoral.trim().toUpperCase()],
+      where: 'sync_status IN (?, ?) AND UPPER(clave_electoral) = ?',
+      whereArgs: [0, 3, claveElectoral.trim().toUpperCase()],
       limit: 1,
     );
 
@@ -209,13 +209,13 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     });
   }
 
-  Future<void> _clearSyncedLocalDuplicate(String claveElectoral) async {
+  Future<void> _clearResolvedLocalDuplicate(String claveElectoral) async {
     final db = await LocalDb.instance.database;
 
     await db.delete(
       'promoted_records',
-      where: 'sync_status = ? AND UPPER(clave_electoral) = ?',
-      whereArgs: [1, claveElectoral.trim().toUpperCase()],
+      where: 'sync_status IN (?, ?) AND UPPER(clave_electoral) = ?',
+      whereArgs: [1, 2, claveElectoral.trim().toUpperCase()],
     );
   }
 
@@ -297,7 +297,7 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
           return;
         }
 
-        await _clearSyncedLocalDuplicate(clave);
+        await _clearResolvedLocalDuplicate(clave);
 
         final existsPendingLocal = await _existsPendingInLocalDb(clave);
         if (existsPendingLocal) {
@@ -305,7 +305,7 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
           return;
         }
       } else {
-        final existsLocal = await _existsInLocalDb(clave);
+        final existsLocal = await _existsBlockingLocalDuplicate(clave);
         if (existsLocal) {
           _showSnack('Este ya se encuentra registrado');
           return;
@@ -422,13 +422,13 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
+      AppDataBus.notify();
       await SyncService().syncPendingPromoted();
 
       final savedRows = await db.query(
         'promoted_records',
-        where: 'UPPER(clave_electoral) = ? AND capturist_id = ?',
-        whereArgs: [clave, uid],
-        orderBy: 'created_at DESC',
+        where: 'local_id = ?',
+        whereArgs: [id],
         limit: 1,
       );
       final savedRecord = savedRows.isNotEmpty ? savedRows.first : null;
