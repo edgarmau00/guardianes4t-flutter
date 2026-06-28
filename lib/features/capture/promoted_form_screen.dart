@@ -6,6 +6,7 @@ import '../../data/local/db_api.dart';
 import '../../data/local/local_db.dart';
 import '../../data/models/promoted_record.dart';
 import '../../data/remote/api_service.dart';
+import '../../services/api_client.dart';
 import '../../services/app_data_bus.dart';
 import '../../services/auth_service.dart';
 import '../../services/cp_service.dart';
@@ -72,6 +73,16 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
         lower.contains('timeout') ||
         lower.contains('reintento') ||
         lower.contains('pendiente por reintento');
+  }
+
+  bool _isConnectivityFailure(Object error) {
+    final lower = error.toString().toLowerCase();
+    return lower.contains('socketexception') ||
+        lower.contains('clientexception') ||
+        lower.contains('connection') ||
+        lower.contains('network') ||
+        lower.contains('timeout') ||
+        lower.contains('failed host lookup');
   }
 
   String _buildSyncDialogMessage({
@@ -219,6 +230,85 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     );
   }
 
+  Future<void> _clearStalePendingLocalDuplicate(String claveElectoral) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'promoted_records',
+      where: 'sync_status IN (?, ?) AND UPPER(clave_electoral) = ?',
+      whereArgs: [0, 3, claveElectoral.trim().toUpperCase()],
+    );
+  }
+
+  Future<void> _clearAllLocalDuplicates(String claveElectoral) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'promoted_records',
+      where: 'UPPER(clave_electoral) = ?',
+      whereArgs: [claveElectoral.trim().toUpperCase()],
+    );
+  }
+
+  Future<Map<String, dynamic>?> _findSavedPromotedRow({
+    required String localId,
+    required String claveElectoral,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    final byLocalId = await db.query(
+      'promoted_records',
+      where: 'local_id = ?',
+      whereArgs: [localId],
+      limit: 1,
+    );
+    if (byLocalId.isNotEmpty) {
+      return byLocalId.first;
+    }
+
+    final byClave = await db.query(
+      'promoted_records',
+      where: 'UPPER(clave_electoral) = ?',
+      whereArgs: [claveElectoral.trim().toUpperCase()],
+    );
+    if (byClave.isEmpty) {
+      return null;
+    }
+
+    byClave.sort((a, b) {
+      final aSync = (a['sync_status'] as int? ?? 0) == 1 ? 1 : 0;
+      final bSync = (b['sync_status'] as int? ?? 0) == 1 ? 1 : 0;
+      if (aSync != bSync) {
+        return bSync.compareTo(aSync);
+      }
+
+      final aHasRemote = (a['remote_id'] ?? '').toString().trim().isNotEmpty ? 1 : 0;
+      final bHasRemote = (b['remote_id'] ?? '').toString().trim().isNotEmpty ? 1 : 0;
+      if (aHasRemote != bHasRemote) {
+        return bHasRemote.compareTo(aHasRemote);
+      }
+
+      final aCreated = (a['created_at'] ?? '').toString();
+      final bCreated = (b['created_at'] ?? '').toString();
+      return bCreated.compareTo(aCreated);
+    });
+
+    return byClave.first;
+  }
+
+  Future<void> _saveLocalPendingPromoted(PromotedRecord record) async {
+    final db = await LocalDb.instance.database;
+    await db.insert(
+      'promoted_records',
+      {
+        ...record.toMap(),
+        'sync_message': 'Pendiente de sincronizacion',
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    AppDataBus.notify();
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -301,8 +391,22 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
 
         final existsPendingLocal = await _existsPendingInLocalDb(clave);
         if (existsPendingLocal) {
-          _showSnack('Este ya se encuentra registrado');
-          return;
+          await SyncService().syncAll();
+          await _clearResolvedLocalDuplicate(clave);
+
+          final existsRemoteAfterSync =
+              await ApiService().promotedExistsByClaveElectoral(clave);
+          if (existsRemoteAfterSync) {
+            _showSnack('Este ya se encuentra registrado');
+            return;
+          }
+
+          final existsPendingAfterSync = await _existsPendingInLocalDb(clave);
+          if (!existsPendingAfterSync) {
+            // El pendiente viejo ya se resolvio; seguimos.
+          } else {
+            await _clearStalePendingLocalDuplicate(clave);
+          }
         }
       } else {
         final existsLocal = await _existsBlockingLocalDuplicate(clave);
@@ -413,25 +517,70 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
       );
 
       final db = await LocalDb.instance.database;
-      await db.insert(
-        'promoted_records',
-        {
-          ...record.toMap(),
-          'sync_message': 'Pendiente de sincronizacion',
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      try {
+        final syncedRecord = await ApiService().uploadPromoted(record);
+        await _clearAllLocalDuplicates(clave);
+        await db.insert(
+          'promoted_records',
+          syncedRecord,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        AppDataBus.notify();
 
-      AppDataBus.notify();
-      await SyncService().syncPendingPromoted();
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Se guardo correctamente'),
+            content: const Text('Se guardo correctamente.'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.pushNamedAndRemoveUntil(
+                    context,
+                    AppRoutes.dashboard,
+                    (route) => false,
+                  );
+                },
+                child: const Text('Cerrar'),
+              ),
+            ],
+          ),
+        );
+        return;
+      } on ApiException catch (error) {
+        if (error.statusCode >= 400 && error.statusCode < 500) {
+          _showSnack(
+            error.message.isEmpty
+                ? 'Este ya se encuentra registrado'
+                : error.message,
+          );
+          return;
+        }
+        rethrow;
+      } catch (error) {
+        if (!_isConnectivityFailure(error)) {
+          rethrow;
+        }
 
-      final savedRows = await db.query(
-        'promoted_records',
-        where: 'local_id = ?',
-        whereArgs: [id],
-        limit: 1,
+        await _clearResolvedLocalDuplicate(clave);
+        final existsPendingLocal = await _existsPendingInLocalDb(clave);
+        if (existsPendingLocal) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+
+        await _saveLocalPendingPromoted(record);
+        if (!hasInternet) {
+          await SyncService().syncPendingPromoted();
+        }
+      }
+
+      final savedRecord = await _findSavedPromotedRow(
+        localId: id,
+        claveElectoral: clave,
       );
-      final savedRecord = savedRows.isNotEmpty ? savedRows.first : null;
       final syncStatus = savedRecord?['sync_status'] as int? ?? 0;
       final syncMessage =
           (savedRecord?['sync_message'] ?? '').toString().trim();

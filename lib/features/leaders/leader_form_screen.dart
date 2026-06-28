@@ -5,6 +5,7 @@ import '../../app/routes.dart';
 import '../../data/local/db_api.dart';
 import '../../data/local/local_db.dart';
 import '../../data/remote/api_service.dart';
+import '../../services/api_client.dart';
 import '../../services/app_data_bus.dart';
 import '../../services/auth_service.dart';
 import '../../services/network_status_service.dart';
@@ -55,6 +56,16 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         lower.contains('timeout') ||
         lower.contains('reintento') ||
         lower.contains('pendiente por reintento');
+  }
+
+  bool _isConnectivityFailure(Object error) {
+    final lower = error.toString().toLowerCase();
+    return lower.contains('socketexception') ||
+        lower.contains('clientexception') ||
+        lower.contains('connection') ||
+        lower.contains('network') ||
+        lower.contains('timeout') ||
+        lower.contains('failed host lookup');
   }
 
   String _buildSyncDialogMessage({
@@ -128,6 +139,79 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     );
   }
 
+  Future<void> _clearStalePendingLocalDuplicates({
+    required String email,
+    required String phone,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'leader_records',
+      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [0, 3, email.trim().toLowerCase(), phone.trim()],
+    );
+  }
+
+  Future<void> _clearAllLocalDuplicates({
+    required String email,
+    required String phone,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    await db.delete(
+      'leader_records',
+      where: 'LOWER(email) = ? OR phone = ?',
+      whereArgs: [email.trim().toLowerCase(), phone.trim()],
+    );
+  }
+
+  Future<Map<String, dynamic>?> _findSavedLeaderRow({
+    required String localId,
+    required String email,
+    required String phone,
+  }) async {
+    final db = await LocalDb.instance.database;
+
+    final byLocalId = await db.query(
+      'leader_records',
+      where: 'local_id = ?',
+      whereArgs: [localId],
+      limit: 1,
+    );
+    if (byLocalId.isNotEmpty) {
+      return byLocalId.first;
+    }
+
+    final byNaturalKey = await db.query(
+      'leader_records',
+      where: 'LOWER(email) = ? OR phone = ?',
+      whereArgs: [email.trim().toLowerCase(), phone.trim()],
+    );
+    if (byNaturalKey.isEmpty) {
+      return null;
+    }
+
+    byNaturalKey.sort((a, b) {
+      final aSync = (a['sync_status'] as int? ?? 0) == 1 ? 1 : 0;
+      final bSync = (b['sync_status'] as int? ?? 0) == 1 ? 1 : 0;
+      if (aSync != bSync) {
+        return bSync.compareTo(aSync);
+      }
+
+      final aHasRemote = (a['remote_id'] ?? '').toString().trim().isNotEmpty ? 1 : 0;
+      final bHasRemote = (b['remote_id'] ?? '').toString().trim().isNotEmpty ? 1 : 0;
+      if (aHasRemote != bHasRemote) {
+        return bHasRemote.compareTo(aHasRemote);
+      }
+
+      final aCreated = (a['created_at'] ?? '').toString();
+      final bCreated = (b['created_at'] ?? '').toString();
+      return bCreated.compareTo(aCreated);
+    });
+
+    return byNaturalKey.first;
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -137,6 +221,21 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     required String phone,
   }) async {
     return ApiService().leaderExists(email: email, phone: phone);
+  }
+
+  Future<void> _saveLocalPendingLeader(
+    Map<String, dynamic> leaderRow,
+  ) async {
+    final db = await LocalDb.instance.database;
+    await db.insert(
+      'leader_records',
+      {
+        ...leaderRow,
+        'sync_message': 'Pendiente de sincronizacion',
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    AppDataBus.notify();
   }
 
   Future<Map<String, dynamic>?> _resolveCurrentLeaderContext({
@@ -331,8 +430,27 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           phone: phone,
         );
         if (existsPendingLocal) {
-          _showSnack('Este ya se encuentra registrado');
-          return;
+          await SyncService().syncAll();
+          await _clearResolvedLocalDuplicates(email: email, phone: phone);
+
+          final existsRemoteAfterSync = await _existsInRemote(
+            email: email,
+            phone: phone,
+          );
+          if (existsRemoteAfterSync) {
+            _showSnack('Este ya se encuentra registrado');
+            return;
+          }
+
+          final existsPendingAfterSync = await _existsPendingInLocalDb(
+            email: email,
+            phone: phone,
+          );
+          if (!existsPendingAfterSync) {
+            // Ya se limpio el duplicado pendiente; seguimos con el guardado.
+          } else {
+            await _clearStalePendingLocalDuplicates(email: email, phone: phone);
+          }
         }
       } else {
         final existsLocal = await _existsBlockingLocalDuplicate(
@@ -493,26 +611,74 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         return;
       }
 
-      await db.insert(
-        'leader_records',
-        {
-          ...leaderRow,
-          'sync_message': 'Pendiente de sincronizacion',
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
+      try {
+        final syncedLeader = await ApiService().uploadLeader(leaderRow);
+        await _clearAllLocalDuplicates(email: email, phone: phone);
+        await db.insert(
+          'leader_records',
+          syncedLeader,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        AppDataBus.notify();
+
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Se guardo correctamente'),
+            content: const Text('Se guardo correctamente.'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.pushNamedAndRemoveUntil(
+                    context,
+                    AppRoutes.dashboard,
+                    (route) => false,
+                  );
+                },
+                child: const Text('Cerrar'),
+              ),
+            ],
+          ),
+        );
+        return;
+      } on ApiException catch (error) {
+        if (error.statusCode >= 400 && error.statusCode < 500) {
+          _showSnack(
+            error.message.isEmpty
+                ? 'Este ya se encuentra registrado'
+                : error.message,
+          );
+          return;
+        }
+        rethrow;
+      } catch (error) {
+        if (!_isConnectivityFailure(error)) {
+          rethrow;
+        }
+
+        await _clearResolvedLocalDuplicates(email: email, phone: phone);
+        final existsPendingLocal = await _existsPendingInLocalDb(
+          email: email,
+          phone: phone,
+        );
+        if (existsPendingLocal) {
+          _showSnack('Este ya se encuentra registrado');
+          return;
+        }
+
+        await _saveLocalPendingLeader(leaderRow);
+        if (!hasInternet) {
+          await SyncService().syncPendingLeaders();
+        }
+      }
+
+      final savedLeader = await _findSavedLeaderRow(
+        localId: localId,
+        email: email,
+        phone: phone,
       );
-
-      AppDataBus.notify();
-      await SyncService().syncPendingLeaders();
-
-      final savedRows = await db.query(
-        'leader_records',
-        where: 'local_id = ?',
-        whereArgs: [localId],
-        limit: 1,
-      );
-
-      final savedLeader = savedRows.isNotEmpty ? savedRows.first : null;
       final syncStatus = savedLeader?['sync_status'] as int? ?? 0;
       final syncMessage =
           (savedLeader?['sync_message'] ?? '').toString().trim();

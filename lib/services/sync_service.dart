@@ -103,6 +103,11 @@ class SyncService {
         }
 
         final syncedRow = await remote.uploadPromoted(record);
+        await _deletePromotedNaturalKeyDuplicates(
+          db: db,
+          previousLocalId: record.localId,
+          claveElectoral: record.claveElectoral,
+        );
         await _upsertSyncedRow(
           db: db,
           table: 'promoted_records',
@@ -157,6 +162,12 @@ class SyncService {
         }
 
         final syncedRow = await remote.uploadLeader(leaderRow);
+        await _deleteLeaderNaturalKeyDuplicates(
+          db: db,
+          previousLocalId: (row['local_id'] ?? '').toString(),
+          email: (leaderRow['email'] ?? '').toString(),
+          phone: (leaderRow['phone'] ?? '').toString(),
+        );
         await _upsertSyncedRow(
           db: db,
           table: 'leader_records',
@@ -474,6 +485,73 @@ class SyncService {
       ...row,
       'password': existingPassword.isEmpty ? row['password'] : existingPassword,
     };
+  }
+
+  Future<void> _deleteLeaderNaturalKeyDuplicates({
+    required Database db,
+    required String previousLocalId,
+    required String email,
+    required String phone,
+  }) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    final normalizedPhone = phone.trim();
+
+    if (normalizedEmail.isEmpty && normalizedPhone.isEmpty) {
+      return;
+    }
+
+    final rows = await db.query(
+      'leader_records',
+      columns: ['local_id'],
+      where:
+          '(LOWER(email) = ? OR phone = ?) AND (local_id <> ? OR local_id IS NULL)',
+      whereArgs: [normalizedEmail, normalizedPhone, previousLocalId],
+    );
+
+    for (final row in rows) {
+      final localId = (row['local_id'] ?? '').toString().trim();
+      if (localId.isEmpty) {
+        continue;
+      }
+
+      await db.delete(
+        'leader_records',
+        where: 'local_id = ?',
+        whereArgs: [localId],
+      );
+    }
+  }
+
+  Future<void> _deletePromotedNaturalKeyDuplicates({
+    required Database db,
+    required String previousLocalId,
+    required String claveElectoral,
+  }) async {
+    final normalizedClave = claveElectoral.trim().toUpperCase();
+    if (normalizedClave.isEmpty) {
+      return;
+    }
+
+    final rows = await db.query(
+      'promoted_records',
+      columns: ['local_id'],
+      where:
+          'UPPER(clave_electoral) = ? AND (local_id <> ? OR local_id IS NULL)',
+      whereArgs: [normalizedClave, previousLocalId],
+    );
+
+    for (final row in rows) {
+      final localId = (row['local_id'] ?? '').toString().trim();
+      if (localId.isEmpty) {
+        continue;
+      }
+
+      await db.delete(
+        'promoted_records',
+        where: 'local_id = ?',
+        whereArgs: [localId],
+      );
+    }
   }
 
   Future<void> _upsertSyncedRow({

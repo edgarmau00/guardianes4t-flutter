@@ -7,7 +7,7 @@ class NetworkStatusService {
     try {
       final response = await http
           .get(Uri.parse('${AppConfig.apiBaseUrl}/health'))
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 6));
       return response.statusCode >= 200 && response.statusCode < 500;
     } catch (_) {
       return false;
