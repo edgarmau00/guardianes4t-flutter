@@ -91,13 +91,15 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
   Future<bool> _existsBlockingLocalDuplicate({
     required String email,
     required String phone,
+    required String role,
   }) async {
     final db = await LocalDb.instance.database;
 
     final rows = await db.query(
       'leader_records',
-      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
-      whereArgs: [0, 3, email.trim().toLowerCase(), phone.trim()],
+      where:
+          'leader_role = ? AND sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [role, 0, 3, email.trim().toLowerCase(), phone.trim()],
       limit: 1,
     );
 
@@ -107,13 +109,14 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
   Future<bool> _existsPendingInLocalDb({
     required String email,
     required String phone,
+    required String role,
   }) async {
     final db = await LocalDb.instance.database;
 
     final rows = await db.query(
       'leader_records',
-      where: 'sync_status IN (?, ?)',
-      whereArgs: [0, 3],
+      where: 'leader_role = ? AND sync_status IN (?, ?)',
+      whereArgs: [role, 0, 3],
     );
 
     final normalizedEmail = email.trim().toLowerCase();
@@ -129,39 +132,44 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
   Future<void> _clearResolvedLocalDuplicates({
     required String email,
     required String phone,
+    required String role,
   }) async {
     final db = await LocalDb.instance.database;
 
     await db.delete(
       'leader_records',
-      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
-      whereArgs: [1, 2, email.trim().toLowerCase(), phone.trim()],
+      where:
+          'leader_role = ? AND sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [role, 1, 2, email.trim().toLowerCase(), phone.trim()],
     );
   }
 
   Future<void> _clearStalePendingLocalDuplicates({
     required String email,
     required String phone,
+    required String role,
   }) async {
     final db = await LocalDb.instance.database;
 
     await db.delete(
       'leader_records',
-      where: 'sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
-      whereArgs: [0, 3, email.trim().toLowerCase(), phone.trim()],
+      where:
+          'leader_role = ? AND sync_status IN (?, ?) AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [role, 0, 3, email.trim().toLowerCase(), phone.trim()],
     );
   }
 
   Future<void> _clearAllLocalDuplicates({
     required String email,
     required String phone,
+    required String role,
   }) async {
     final db = await LocalDb.instance.database;
 
     await db.delete(
       'leader_records',
-      where: 'LOWER(email) = ? OR phone = ?',
-      whereArgs: [email.trim().toLowerCase(), phone.trim()],
+      where: 'leader_role = ? AND (LOWER(email) = ? OR phone = ?)',
+      whereArgs: [role, email.trim().toLowerCase(), phone.trim()],
     );
   }
 
@@ -216,13 +224,6 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
     return NetworkStatusService().hasInternet();
   }
 
-  Future<bool> _existsInRemote({
-    required String email,
-    required String phone,
-  }) async {
-    return ApiService().leaderExists(email: email, phone: phone);
-  }
-
   Future<void> _saveLocalPendingLeader(
     Map<String, dynamic> leaderRow,
   ) async {
@@ -236,6 +237,25 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
     AppDataBus.notify();
+  }
+
+  Future<bool> _reconcileRemoteLeaderDuplicate({
+    required String email,
+    required String phone,
+    required String role,
+  }) async {
+    final remoteExists = await ApiService().leaderExists(
+      email: email,
+      phone: phone,
+      role: role,
+    );
+
+    if (!remoteExists) {
+      await _clearAllLocalDuplicates(email: email, phone: phone, role: role);
+      AppDataBus.notify();
+    }
+
+    return remoteExists;
   }
 
   Future<Map<String, dynamic>?> _resolveCurrentLeaderContext({
@@ -415,47 +435,48 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
 
     try {
       final hasInternet = await _hasInternet();
+      final targetRole = _targetRole;
+
+      if (targetRole.isEmpty) {
+        _showSnack('No se pudo determinar el rol del registro.');
+        return;
+      }
 
       if (hasInternet) {
-        final existsRemote = await _existsInRemote(email: email, phone: phone);
-        if (existsRemote) {
+        await SyncService().syncAll();
+        await _clearResolvedLocalDuplicates(
+          email: email,
+          phone: phone,
+          role: targetRole,
+        );
+
+        final remoteExists = await _reconcileRemoteLeaderDuplicate(
+          email: email,
+          phone: phone,
+          role: targetRole,
+        );
+        if (remoteExists) {
           _showSnack('Este ya se encuentra registrado');
           return;
         }
 
-        await _clearResolvedLocalDuplicates(email: email, phone: phone);
-
         final existsPendingLocal = await _existsPendingInLocalDb(
           email: email,
           phone: phone,
+          role: targetRole,
         );
         if (existsPendingLocal) {
-          await SyncService().syncAll();
-          await _clearResolvedLocalDuplicates(email: email, phone: phone);
-
-          final existsRemoteAfterSync = await _existsInRemote(
+          await _clearAllLocalDuplicates(
             email: email,
             phone: phone,
+            role: targetRole,
           );
-          if (existsRemoteAfterSync) {
-            _showSnack('Este ya se encuentra registrado');
-            return;
-          }
-
-          final existsPendingAfterSync = await _existsPendingInLocalDb(
-            email: email,
-            phone: phone,
-          );
-          if (!existsPendingAfterSync) {
-            // Ya se limpio el duplicado pendiente; seguimos con el guardado.
-          } else {
-            await _clearStalePendingLocalDuplicates(email: email, phone: phone);
-          }
         }
       } else {
         final existsLocal = await _existsBlockingLocalDuplicate(
           email: email,
           phone: phone,
+          role: targetRole,
         );
         if (existsLocal) {
           _showSnack('Este ya se encuentra registrado');
@@ -498,7 +519,7 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         return;
       }
 
-      final targetRole = isAdminSession ? 'leader_parent' : 'promoter';
+      final resolvedTargetRole = isAdminSession ? 'leader_parent' : 'promoter';
       final currentLeaderName =
           (currentLeaderContext?['full_name'] ?? '').toString().trim();
       final currentLeaderRemoteId =
@@ -577,7 +598,7 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         'owner_admin_name': ownerAdminName.isEmpty ? null : ownerAdminName,
         'owner_admin_email': ownerAdminEmail.isEmpty ? null : ownerAdminEmail,
         'auth_user_id': null,
-        'leader_role': targetRole,
+        'leader_role': resolvedTargetRole,
         'parent_leader_local_id':
             isLeaderParentSession ? currentLeaderContext!['local_id'] : null,
         'parent_leader_remote_id':
@@ -613,7 +634,11 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
 
       try {
         final syncedLeader = await ApiService().uploadLeader(leaderRow);
-        await _clearAllLocalDuplicates(email: email, phone: phone);
+        await _clearAllLocalDuplicates(
+          email: email,
+          phone: phone,
+          role: resolvedTargetRole,
+        );
         await db.insert(
           'leader_records',
           syncedLeader,
@@ -645,12 +670,19 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
         return;
       } on ApiException catch (error) {
         if (error.statusCode >= 400 && error.statusCode < 500) {
-          _showSnack(
-            error.message.isEmpty
-                ? 'Este ya se encuentra registrado'
-                : error.message,
+          final remoteExists = await _reconcileRemoteLeaderDuplicate(
+            email: email,
+            phone: phone,
+            role: resolvedTargetRole,
           );
-          return;
+          if (remoteExists) {
+            _showSnack(
+              error.message.isEmpty
+                  ? 'Este ya se encuentra registrado'
+                  : error.message,
+            );
+            return;
+          }
         }
         rethrow;
       } catch (error) {
@@ -658,14 +690,22 @@ class _LeaderFormScreenState extends State<LeaderFormScreen> {
           rethrow;
         }
 
-        await _clearResolvedLocalDuplicates(email: email, phone: phone);
+        await _clearResolvedLocalDuplicates(
+          email: email,
+          phone: phone,
+          role: resolvedTargetRole,
+        );
         final existsPendingLocal = await _existsPendingInLocalDb(
           email: email,
           phone: phone,
+          role: resolvedTargetRole,
         );
         if (existsPendingLocal) {
-          _showSnack('Este ya se encuentra registrado');
-          return;
+          await _clearStalePendingLocalDuplicates(
+            email: email,
+            phone: phone,
+            role: resolvedTargetRole,
+          );
         }
 
         await _saveLocalPendingLeader(leaderRow);

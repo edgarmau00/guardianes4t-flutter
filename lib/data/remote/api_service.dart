@@ -257,6 +257,7 @@ class ApiService {
   Future<bool> leaderExists({
     required String email,
     required String phone,
+    String role = 'all',
   }) async {
     final response = await _client.getJson(
       '/api/leaders/exists',
@@ -264,6 +265,7 @@ class ApiService {
       query: {
         'email': email.trim().toLowerCase(),
         'phone': phone.trim(),
+        'role': role.trim().isEmpty ? 'all' : role.trim(),
       },
     );
 

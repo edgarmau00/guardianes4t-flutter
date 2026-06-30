@@ -85,23 +85,6 @@ class SyncService {
       final record = PromotedRecord.fromMap(row);
 
       try {
-        final existsRemote = await remote.promotedExistsByClaveElectoral(
-          record.claveElectoral,
-        );
-
-        if (existsRemote) {
-          await db.update(
-            'promoted_records',
-            {
-              'sync_status': _statusRejected,
-              'sync_message': 'Este ya se encuentra registrado',
-            },
-            where: 'local_id = ?',
-            whereArgs: [record.localId],
-          );
-          continue;
-        }
-
         final syncedRow = await remote.uploadPromoted(record);
         await _deletePromotedNaturalKeyDuplicates(
           db: db,
@@ -308,26 +291,31 @@ class SyncService {
     List<Object?> whereArgs;
 
     if (sessionRole == 'superadmin') {
-      whereClause = 'sync_status = ?';
-      whereArgs = [_statusSynced];
+      whereClause = "leader_role IN ('leader_parent', 'promoter')";
+      whereArgs = [];
     } else if (sessionRole == 'admin') {
-      whereClause = 'owner_admin_user_id = ? AND sync_status = ?';
-      whereArgs = [uid, _statusSynced];
+      whereClause =
+          "owner_admin_user_id = ? AND leader_role IN ('leader_parent', 'promoter')";
+      whereArgs = [uid];
     } else {
-      whereClause = 'capturist_id = ? AND sync_status = ?';
-      whereArgs = [uid, _statusSynced];
+      whereClause = 'capturist_id = ? AND leader_role = ?';
+      whereArgs = [uid, 'promoter'];
     }
 
     final localRows = await db.query(
       'leader_records',
-      columns: ['local_id'],
+      columns: ['local_id', 'auth_user_id'],
       where: whereClause,
       whereArgs: whereArgs,
     );
 
     for (final row in localRows) {
       final localId = (row['local_id'] ?? '').toString().trim();
+      final authUserId = (row['auth_user_id'] ?? '').toString().trim();
       if (localId.isEmpty || remoteIds.contains(localId)) {
+        continue;
+      }
+      if (authUserId == uid) {
         continue;
       }
 

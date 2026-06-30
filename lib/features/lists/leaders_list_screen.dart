@@ -23,6 +23,7 @@ class _LeadersListScreenState extends State<LeadersListScreen> {
   bool _loading = true;
   String _sessionRole = 'unknown';
   String _adminScope = 'leaders';
+  String _statusFilter = 'all';
   bool _didLoadRouteArgs = false;
 
   bool _isPrivilegedAdmin(String role) =>
@@ -137,9 +138,27 @@ class _LeadersListScreenState extends State<LeadersListScreen> {
 
     setState(() {
       _sessionRole = sessionRole;
-      _items = rows;
+      _items = _applyStatusFilter(rows);
       _loading = false;
     });
+  }
+
+  List<Map<String, dynamic>> _applyStatusFilter(List<Map<String, dynamic>> rows) {
+    if (_statusFilter == 'pending') {
+      return rows.where((row) {
+        final status = row['sync_status'] as int? ?? 0;
+        return status == 0 || status == 3;
+      }).toList();
+    }
+
+    if (_statusFilter == 'rejected') {
+      return rows.where((row) {
+        final status = row['sync_status'] as int? ?? 0;
+        return status == 2;
+      }).toList();
+    }
+
+    return rows;
   }
 
   List<Map<String, dynamic>> _dedupeLeaderRows(
@@ -230,8 +249,13 @@ class _LeadersListScreenState extends State<LeadersListScreen> {
     final args = ModalRoute.of(context)?.settings.arguments;
     if (args is Map) {
       final scope = (args['scope'] ?? '').toString();
+      final status = (args['status'] ?? '').toString();
       if (scope == 'leaders' || scope == 'promoters') {
         _adminScope = scope;
+        shouldReload = true;
+      }
+      if (status == 'pending' || status == 'rejected' || status == 'all') {
+        _statusFilter = status;
         shouldReload = true;
       }
     }
@@ -250,11 +274,16 @@ class _LeadersListScreenState extends State<LeadersListScreen> {
   @override
   Widget build(BuildContext context) {
     const primary = Color(0xFF7A0C0C);
-    final title = _isPrivilegedAdmin(_sessionRole)
-        ? (_adminScope == 'promoters'
-            ? 'Promotores registrados'
-            : 'Lideres registrados')
-        : 'Promotores registrados';
+    final subject = _adminScope == 'promoters' ? 'Promotores' : 'Lideres';
+    final title = _statusFilter == 'pending'
+        ? '$subject pendientes'
+        : _statusFilter == 'rejected'
+            ? '$subject rechazados'
+            : _isPrivilegedAdmin(_sessionRole)
+                ? (_adminScope == 'promoters'
+                    ? 'Promotores registrados'
+                    : 'Lideres registrados')
+                : 'Promotores registrados';
 
     return Scaffold(
       appBar: AppBar(
@@ -273,8 +302,14 @@ class _LeadersListScreenState extends State<LeadersListScreen> {
                   child: Text('Tu rol no tiene acceso a esta seccion'),
                 )
               : _items.isEmpty
-                  ? const Center(
-                      child: Text('No hay registros disponibles'),
+                  ? Center(
+                      child: Text(
+                        _statusFilter == 'pending'
+                            ? 'No hay registros pendientes'
+                            : _statusFilter == 'rejected'
+                                ? 'No hay registros rechazados'
+                                : 'No hay registros disponibles',
+                      ),
                     )
                   : ListView.separated(
                       padding: const EdgeInsets.all(16),

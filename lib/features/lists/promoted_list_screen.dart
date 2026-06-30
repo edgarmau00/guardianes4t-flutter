@@ -21,6 +21,8 @@ class _PromotedListScreenState extends State<PromotedListScreen> {
   List<Map<String, dynamic>> _items = [];
   bool _loading = true;
   String _sessionRole = 'unknown';
+  String _statusFilter = 'all';
+  bool _didLoadRouteArgs = false;
 
   bool _isPrivilegedAdmin(String role) =>
       role == 'superadmin' || role == 'admin';
@@ -128,9 +130,27 @@ class _PromotedListScreenState extends State<PromotedListScreen> {
 
     setState(() {
       _sessionRole = sessionRole;
-      _items = rows;
+      _items = _applyStatusFilter(rows);
       _loading = false;
     });
+  }
+
+  List<Map<String, dynamic>> _applyStatusFilter(List<Map<String, dynamic>> rows) {
+    if (_statusFilter == 'pending') {
+      return rows.where((row) {
+        final status = row['sync_status'] as int? ?? 0;
+        return status == 0 || status == 3;
+      }).toList();
+    }
+
+    if (_statusFilter == 'rejected') {
+      return rows.where((row) {
+        final status = row['sync_status'] as int? ?? 0;
+        return status == 2;
+      }).toList();
+    }
+
+    return rows;
   }
 
   List<Map<String, dynamic>> _dedupeLeaderRows(
@@ -230,6 +250,27 @@ class _PromotedListScreenState extends State<PromotedListScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_didLoadRouteArgs) return;
+
+    var shouldReload = false;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map) {
+      final status = (args['status'] ?? '').toString();
+      if (status == 'pending' || status == 'rejected' || status == 'all') {
+        _statusFilter = status;
+        shouldReload = true;
+      }
+    }
+
+    _didLoadRouteArgs = true;
+    if (shouldReload) {
+      _load();
+    }
+  }
+
+  @override
   void dispose() {
     _busSubscription?.cancel();
     super.dispose();
@@ -238,21 +279,30 @@ class _PromotedListScreenState extends State<PromotedListScreen> {
   @override
   Widget build(BuildContext context) {
     const primary = Color(0xFF7A0C0C);
-    final emptyLabel = _sessionRole == 'superadmin'
-        ? 'No hay guardianes registrados'
-        : _sessionRole == 'admin'
-            ? 'No hay guardianes en tu estructura'
-            : _sessionRole == 'leader_parent'
-                ? 'No hay guardianes relacionados a tus promotores'
-                : 'No hay guardianes registrados';
+    final title = _statusFilter == 'pending'
+        ? 'Guardianes pendientes'
+        : _statusFilter == 'rejected'
+            ? 'Guardianes rechazados'
+            : 'Guardianes registrados';
+    final emptyLabel = _statusFilter == 'pending'
+        ? 'No hay guardianes pendientes'
+        : _statusFilter == 'rejected'
+            ? 'No hay guardianes rechazados'
+            : _sessionRole == 'superadmin'
+                ? 'No hay guardianes registrados'
+                : _sessionRole == 'admin'
+                    ? 'No hay guardianes en tu estructura'
+                    : _sessionRole == 'leader_parent'
+                        ? 'No hay guardianes relacionados a tus promotores'
+                        : 'No hay guardianes registrados';
 
     return Scaffold(
       appBar: AppBar(
         backgroundColor: primary,
         foregroundColor: Colors.white,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text(
-          'Guardianes registrados',
+        title: Text(
+          title,
           style: TextStyle(color: Colors.white),
         ),
       ),

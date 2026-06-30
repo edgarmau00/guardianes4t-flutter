@@ -761,6 +761,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         value: guardiansPending.toString(),
                         color: const Color(0xFFF59E0B),
                         icon: Icons.sync_rounded,
+                        onTap: () => Navigator.pushNamed(
+                          context,
+                          AppRoutes.promotedList,
+                          arguments: {'status': 'pending'},
+                        ),
                       ),
                       if (_isPrivilegedAdmin(_sessionRole))
                         DashboardCard(
@@ -768,13 +773,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           value: leadersPending.toString(),
                           color: const Color(0xFFF97316),
                           icon: Icons.hourglass_top_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'leaders',
+                              'status': 'pending',
+                            },
+                          ),
                         ),
                       if (_sessionRole == 'leader_parent')
                         DashboardCard(
                           title: 'Promotores pendientes',
-                          value: leadersPending.toString(),
+                          value: promotersPending.toString(),
                           color: const Color(0xFFF97316),
                           icon: Icons.hourglass_top_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'promoters',
+                              'status': 'pending',
+                            },
+                          ),
                         ),
                       if (_isPrivilegedAdmin(_sessionRole))
                         DashboardCard(
@@ -782,12 +803,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           value: promotersPending.toString(),
                           color: const Color(0xFFEA580C),
                           icon: Icons.person_search_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'promoters',
+                              'status': 'pending',
+                            },
+                          ),
                         ),
                       DashboardCard(
                         title: 'Guardianes rechazados',
                         value: guardiansRejected.toString(),
                         color: const Color(0xFFDC2626),
                         icon: Icons.gpp_bad_rounded,
+                        onTap: () => Navigator.pushNamed(
+                          context,
+                          AppRoutes.promotedList,
+                          arguments: {'status': 'rejected'},
+                        ),
                       ),
                       if (_isPrivilegedAdmin(_sessionRole))
                         DashboardCard(
@@ -795,13 +829,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           value: leadersRejected.toString(),
                           color: const Color(0xFFBE123C),
                           icon: Icons.block_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'leaders',
+                              'status': 'rejected',
+                            },
+                          ),
                         ),
                       if (_sessionRole == 'leader_parent')
                         DashboardCard(
                           title: 'Promotores rechazados',
-                          value: leadersRejected.toString(),
+                          value: promotersRejected.toString(),
                           color: const Color(0xFFBE123C),
                           icon: Icons.block_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'promoters',
+                              'status': 'rejected',
+                            },
+                          ),
                         ),
                       if (_isPrivilegedAdmin(_sessionRole))
                         DashboardCard(
@@ -809,6 +859,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           value: promotersRejected.toString(),
                           color: const Color(0xFF9F1239),
                           icon: Icons.person_off_rounded,
+                          onTap: () => Navigator.pushNamed(
+                            context,
+                            AppRoutes.leadersList,
+                            arguments: {
+                              'scope': 'promoters',
+                              'status': 'rejected',
+                            },
+                          ),
                         ),
                       if (_isPrivilegedAdmin(_sessionRole))
                         DashboardCard(

@@ -309,6 +309,18 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
     AppDataBus.notify();
   }
 
+  Future<bool> _reconcileRemotePromotedDuplicate(String claveElectoral) async {
+    final remoteExists =
+        await ApiService().promotedExistsByClaveElectoral(claveElectoral);
+
+    if (!remoteExists) {
+      await _clearAllLocalDuplicates(claveElectoral);
+      AppDataBus.notify();
+    }
+
+    return remoteExists;
+  }
+
   Future<bool> _hasInternet() async {
     return NetworkStatusService().hasInternet();
   }
@@ -380,33 +392,18 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
       final hasInternet = await _hasInternet();
 
       if (hasInternet) {
-        final existsRemote =
-            await ApiService().promotedExistsByClaveElectoral(clave);
-        if (existsRemote) {
+        await SyncService().syncAll();
+        await _clearResolvedLocalDuplicate(clave);
+
+        final remoteExists = await _reconcileRemotePromotedDuplicate(clave);
+        if (remoteExists) {
           _showSnack('Este ya se encuentra registrado');
           return;
         }
 
-        await _clearResolvedLocalDuplicate(clave);
-
         final existsPendingLocal = await _existsPendingInLocalDb(clave);
         if (existsPendingLocal) {
-          await SyncService().syncAll();
-          await _clearResolvedLocalDuplicate(clave);
-
-          final existsRemoteAfterSync =
-              await ApiService().promotedExistsByClaveElectoral(clave);
-          if (existsRemoteAfterSync) {
-            _showSnack('Este ya se encuentra registrado');
-            return;
-          }
-
-          final existsPendingAfterSync = await _existsPendingInLocalDb(clave);
-          if (!existsPendingAfterSync) {
-            // El pendiente viejo ya se resolvio; seguimos.
-          } else {
-            await _clearStalePendingLocalDuplicate(clave);
-          }
+          await _clearAllLocalDuplicates(clave);
         }
       } else {
         final existsLocal = await _existsBlockingLocalDuplicate(clave);
@@ -551,9 +548,19 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
         return;
       } on ApiException catch (error) {
         if (error.statusCode >= 400 && error.statusCode < 500) {
+          final remoteExists = await _reconcileRemotePromotedDuplicate(clave);
+          if (remoteExists) {
+            _showSnack(
+              error.message.isEmpty
+                  ? 'Este ya se encuentra registrado'
+                  : error.message,
+            );
+            return;
+          }
+
           _showSnack(
             error.message.isEmpty
-                ? 'Este ya se encuentra registrado'
+                ? 'No se pudo guardar en servidor. Intenta nuevamente.'
                 : error.message,
           );
           return;
@@ -567,8 +574,7 @@ class _PromotedFormScreenState extends State<PromotedFormScreen> {
         await _clearResolvedLocalDuplicate(clave);
         final existsPendingLocal = await _existsPendingInLocalDb(clave);
         if (existsPendingLocal) {
-          _showSnack('Este ya se encuentra registrado');
-          return;
+          await _clearStalePendingLocalDuplicate(clave);
         }
 
         await _saveLocalPendingPromoted(record);
